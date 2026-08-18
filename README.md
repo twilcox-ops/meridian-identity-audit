@@ -11,13 +11,17 @@ TODO: one paragraph, problem-first, before any mention of libraries.
 
 ## Status
 
-Part A's first two checks are implemented, covered by tests that mock Graph
-pagination and 429 throttling, and live-verified against a real tenant:
+Part A's first three checks are implemented, covered by tests that mock
+Graph pagination and 429 throttling, and live-verified against a real
+tenant:
 
 - Users without MFA registered.
 - Licensed users inactive 90+ days. The live run found 0 stale users in the
   sandbox tenant — expected, since its test users are fictitious and freshly
   created rather than long-idle, not evidence the logic never matches.
+- Guest accounts and how long they've been in the tenant. The live run
+  found 0 guests — expected for a fresh sandbox with no external invites
+  sent, not evidence the logic doesn't work.
 
 Everything else in Part A, and all of Part B, is not started.
 

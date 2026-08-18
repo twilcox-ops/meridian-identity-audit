@@ -26,11 +26,11 @@ Permissions section.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from identity_audit.graph_client import GRAPH_BASE_URL, GraphClient
+from identity_audit.graph_dates import parse_graph_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,6 @@ USERS_PATH = "/users"
 STALE_SIGN_IN_THRESHOLD_DAYS = 90
 
 _SELECT_FIELDS = "userPrincipalName,displayName,signInActivity,assignedLicenses"
-
-# Graph sometimes returns lastSignInDateTime with 7 fractional-second digits
-# (100-ns ticks as decimals); datetime.fromisoformat only accepts up to 6.
-_EXCESS_FRACTIONAL_SECONDS_RE = re.compile(r"(\.\d{6})\d+")
 
 
 @dataclass(frozen=True)
@@ -90,7 +86,7 @@ def find_stale_licensed_users(
             if last_sign_in_raw is None:
                 is_stale = True  # never signed in - trivially 90+ days stale
             else:
-                is_stale = _parse_graph_datetime(last_sign_in_raw) <= cutoff
+                is_stale = parse_graph_datetime(last_sign_in_raw) <= cutoff
 
             if is_stale:
                 results.append(
@@ -107,10 +103,3 @@ def find_stale_licensed_users(
         STALE_SIGN_IN_THRESHOLD_DAYS,
     )
     return results
-
-
-def _parse_graph_datetime(value: str) -> datetime:
-    """Parse a Graph ISO 8601 timestamp into an aware UTC datetime."""
-    value = value.replace("Z", "+00:00")
-    value = _EXCESS_FRACTIONAL_SECONDS_RE.sub(r"\1", value)
-    return datetime.fromisoformat(value)

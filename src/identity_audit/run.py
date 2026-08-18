@@ -10,6 +10,7 @@ import logging
 import sys
 
 from identity_audit.auth import get_access_token
+from identity_audit.checks.guest_accounts import find_guest_accounts
 from identity_audit.checks.mfa import find_users_without_mfa
 from identity_audit.checks.stale_accounts import (
     STALE_SIGN_IN_THRESHOLD_DAYS,
@@ -49,6 +50,14 @@ def main() -> int:
     for user in stale_users:
         last_seen = user.last_sign_in or "never signed in"
         print(f"  {user.user_principal_name}  ({user.display_name})  last sign-in: {last_seen}")
+
+    guests = find_guest_accounts(client)
+    print(f"\nGuest accounts ({len(guests)}):")
+    for guest in guests:
+        print(
+            f"  {guest.user_principal_name}  ({guest.display_name})  "
+            f"{guest.days_in_tenant} days in tenant"
+        )
 
     return 0
 
