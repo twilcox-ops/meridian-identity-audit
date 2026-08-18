@@ -12,6 +12,7 @@ import sys
 from identity_audit.auth import get_access_token
 from identity_audit.checks.guest_accounts import find_guest_accounts
 from identity_audit.checks.mfa import find_users_without_mfa
+from identity_audit.checks.privileged_roles import find_privileged_role_holders
 from identity_audit.checks.stale_accounts import (
     STALE_SIGN_IN_THRESHOLD_DAYS,
     find_stale_licensed_users,
@@ -57,6 +58,14 @@ def main() -> int:
         print(
             f"  {guest.user_principal_name}  ({guest.display_name})  "
             f"{guest.days_in_tenant} days in tenant"
+        )
+
+    privileged_users = find_privileged_role_holders(client)
+    print(f"\nUsers holding privileged directory roles ({len(privileged_users)}):")
+    for user in privileged_users:
+        print(
+            f"  {user.user_principal_name}  ({user.display_name})  "
+            f"roles: {', '.join(user.roles)}"
         )
 
     return 0

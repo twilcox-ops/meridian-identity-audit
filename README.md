@@ -11,7 +11,7 @@ TODO: one paragraph, problem-first, before any mention of libraries.
 
 ## Status
 
-Part A's first three checks are implemented, covered by tests that mock
+Part A's first four checks are implemented, covered by tests that mock
 Graph pagination and 429 throttling, and live-verified against a real
 tenant:
 
@@ -22,6 +22,8 @@ tenant:
 - Guest accounts and how long they've been in the tenant. The live run
   found 0 guests — expected for a fresh sandbox with no external invites
   sent, not evidence the logic doesn't work.
+- Users holding privileged directory roles. The live run found the expected
+  sandbox tenant admin as the sole privileged-role holder.
 
 Everything else in Part A, and all of Part B, is not started.
 
@@ -70,6 +72,7 @@ and a typed confirmation.
 | `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. |
 | `Reports.Read.All` | Application | Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. Microsoft's docs list this as sufficient on its own, but live testing against this tenant showed it is **not** — see `AuditLog.Read.All` below. |
 | `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. Also covers the stale-account check's `signInActivity` reads on `/users` — live-tested against the tenant, no additional permission was needed there. |
+| `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs. |
 
 ## Setup
 
