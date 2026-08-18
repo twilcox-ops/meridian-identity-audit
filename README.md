@@ -47,11 +47,16 @@ escalated to critical, since that account does have MFA registered), and
 the report rendered correctly in a browser. See "Report severity model"
 below for the ranking logic.
 
-This closes only the report-*generation* part of the "audit runs nightly,
-unattended, emailing a severity-ranked report" acceptance criterion.
-Nightly scheduling and email delivery are still separate, not-yet-built
-pieces — right now the report is a local file only
-(`reports/audit-report.html`), produced by a manual run.
+Email delivery is also implemented, tested, and live-verified
+end-to-end — the report email was sent via Graph's `sendMail` and
+confirmed received in the sandbox mailbox, not just accepted with a 202
+by the API. It's optional: unset `DIGEST_TO`/`DIGEST_FROM` and a run
+produces the local file only.
+
+This closes both the report-*generation* and email-delivery parts of the
+"audit runs nightly, unattended, emailing a severity-ranked report"
+acceptance criterion. Nightly scheduling is the one piece still
+not-yet-built — right now a run is triggered manually.
 
 The "read-only until the audit is solid" gate from the project brief is now
 met: every check so far issues GET requests only, and all seven of the
@@ -137,6 +142,7 @@ The full reasoning, and the code that implements it, lives in
 | `Application.Read.All` | Application | Needed by the service-principal-credential check to read `passwordCredentials`/`keyCredentials` on `/servicePrincipals` — service principal objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant. |
 | `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time. |
 | `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required. |
+| `Mail.Send` | Application | Needed to send the audit report via `POST /users/{sender}/sendMail`. Distinct from every other permission above: this is the first genuinely **write-capable** grant in the project — everything else is `*.Read.*`. Confirmed by live testing end-to-end: the email was both accepted by Graph and confirmed received in the mailbox, not just a 202 response. As granted, it's unscoped to a single mailbox — app-only `Mail.Send` allows sending as any user in the tenant, not just the configured sender. See "What I'd do differently" for why that's a known tradeoff, not something addressed in this portfolio version. |
 
 ## Setup
 
@@ -176,3 +182,12 @@ the project is further along.*
   PFX via PowerShell, then converting to PEM via OpenSSL. Lesson: budget
   time for tooling gaps between "the cert exists" and "the cert is usable
   by your auth library."
+- `Mail.Send` is granted app-wide, not scoped to the one mailbox this
+  project actually sends from. Graph's app-only `Mail.Send` permission by
+  default lets the app send as *any* mailbox in the tenant; Exchange
+  Online's `ApplicationAccessPolicy` can restrict that to a single
+  mailbox, but setting one up is an Exchange admin action outside this
+  repo's code, and wasn't done here. Known tradeoff, not an oversight —
+  worth calling out unprompted in an interview rather than waiting to be
+  asked, and the first thing to fix before this pattern touched a real
+  production tenant.

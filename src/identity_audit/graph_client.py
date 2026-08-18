@@ -1,10 +1,12 @@
-"""Thin Microsoft Graph HTTP client: pagination and throttling, nothing else.
+"""Thin Microsoft Graph HTTP client: pagination, throttling, and now a
+single-request POST path (for calls like sendMail that don't paginate).
 
-Every request is logged with its status code and the number of items
-returned - no response bodies, no PII beyond what a log line needs to say
-"this call happened and returned N records". HTTP 429 is handled by waiting
-exactly as long as the `Retry-After` header says before retrying the same
-request - never a fixed sleep, never an immediate retry.
+Every request is logged with its status code and, for GETs, the number of
+items returned - no response bodies, no PII beyond what a log line needs to
+say "this call happened and returned N records". HTTP 429 is handled by
+waiting exactly as long as the `Retry-After` header says before retrying
+the same request - never a fixed sleep, never an immediate retry. That
+retry loop is shared between GET and POST rather than duplicated.
 
 The `requests.Session` (and the sleep function) are injectable so tests can
 prove the pagination and throttling logic without a real tenant.
@@ -79,18 +81,47 @@ class GraphClient:
             next_url = payload.get("@odata.nextLink")
             next_params = None
 
+    def post(self, url: str, json_body: dict[str, Any]) -> requests.Response:
+        """POST once (no pagination), honoring 429/Retry-After like `get_pages`.
+
+        Raises `GraphError` on a non-2xx response, same as `get_pages` -
+        the caller decides whether a failed send is fatal or just logged.
+        """
+        response = self._with_429_retry(
+            lambda: self._session.post(url, headers=self._headers, json=json_body),
+            method="POST",
+            url_for_logging=url,
+        )
+        status = response.status_code
+
+        if status >= 400:
+            logger.error("POST %s -> %s", _strip_query(url), status)
+            raise GraphError(f"Graph request failed with status {status}")
+
+        logger.info("POST %s -> %s", _strip_query(url), status)
+        return response
+
     def _request_with_retry(
         self, url: str, params: dict[str, Any] | None
     ) -> requests.Response:
+        return self._with_429_retry(
+            lambda: self._session.get(url, headers=self._headers, params=params),
+            method="GET",
+            url_for_logging=url,
+        )
+
+    def _with_429_retry(self, request_fn, method: str, url_for_logging: str) -> requests.Response:
+        """Call `request_fn()` repeatedly, waiting out every 429 by its Retry-After."""
         while True:
-            response = self._session.get(url, headers=self._headers, params=params)
+            response = request_fn()
             if response.status_code != 429:
                 return response
 
             retry_after = _parse_retry_after(response.headers.get("Retry-After"))
             logger.warning(
-                "GET %s -> 429, waiting %ss (Retry-After)",
-                _strip_query(url),
+                "%s %s -> 429, waiting %ss (Retry-After)",
+                method,
+                _strip_query(url_for_logging),
                 retry_after,
             )
             self._sleep(retry_after)

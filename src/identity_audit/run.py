@@ -31,7 +31,13 @@ from identity_audit.checks.stale_accounts import (
 )
 from identity_audit.config import load_graph_config
 from identity_audit.graph_client import GraphClient
-from identity_audit.report import build_findings, summary_line, write_report
+from identity_audit.mailer import maybe_send_report_email
+from identity_audit.report import (
+    build_findings,
+    render_html_report,
+    summary_line,
+    write_report,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,8 +131,20 @@ def main() -> int:
         ownerless_groups=ownerless_groups,
         flagged_devices=flagged_devices,
     )
-    report_path = write_report(findings)
-    print(f"\nWrote severity-ranked report to {report_path} ({summary_line(findings)})")
+    html = render_html_report(findings)
+    report_path = write_report(findings, html=html)
+    summary = summary_line(findings)
+    print(f"\nWrote severity-ranked report to {report_path} ({summary})")
+
+    # Optional final step: gated on DIGEST_TO/DIGEST_FROM being set, so a
+    # run with no email configured still succeeds with just the local file.
+    email_sent = maybe_send_report_email(
+        client, subject=f"Identity Audit: {summary}", html_body=html
+    )
+    if email_sent:
+        print("Sent report email.")
+    else:
+        print("Report email skipped (see log for why).")
 
     return 0
 

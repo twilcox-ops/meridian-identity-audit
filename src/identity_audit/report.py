@@ -312,9 +312,21 @@ th { background: #f5f5f5; }
 """
 
 
-def write_report(findings: list[Finding], path: Path = DEFAULT_REPORT_PATH) -> Path:
-    """Render and write the HTML report to `path`, creating parent dirs as needed."""
+def write_report(
+    findings: list[Finding],
+    path: Path = DEFAULT_REPORT_PATH,
+    html: str | None = None,
+) -> Path:
+    """Write the HTML report to `path`, creating parent dirs as needed.
+
+    Pass `html` (e.g. from a `render_html_report(findings)` call the caller
+    already made, to also email the same content) to avoid rendering twice -
+    rendering again would carry a slightly different `generated_at`
+    timestamp than what was emailed. Renders internally if omitted.
+    """
+    if html is None:
+        html = render_html_report(findings)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_html_report(findings), encoding="utf-8")
+    path.write_text(html, encoding="utf-8")
     logger.info("Wrote severity-ranked report to %s (%d finding(s))", path, len(findings))
     return path
