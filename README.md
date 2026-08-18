@@ -53,10 +53,21 @@ confirmed received in the sandbox mailbox, not just accepted with a 202
 by the API. It's optional: unset `DIGEST_TO`/`DIGEST_FROM` and a run
 produces the local file only.
 
-This closes both the report-*generation* and email-delivery parts of the
-"audit runs nightly, unattended, emailing a severity-ranked report"
-acceptance criterion. Nightly scheduling is the one piece still
-not-yet-built — right now a run is triggered manually.
+Nightly scheduling via GitHub Actions is now implemented and
+live-verified — a manually triggered run of the workflow succeeded
+end-to-end: all seven checks returned 200, the report was written, and
+the email sent with a 202, confirmed received in the sandbox mailbox from
+the automated run itself, not just from a local one. The CI-log
+suppression was confirmed live too: the Actions run log showed only the
+per-check summary-count lines, no per-user detail. GitHub's own secret
+scrubbing added a second layer on top of that automatically, redacting
+the `DIGEST_FROM` address in the log wherever it appeared, on top of
+(not instead of) the suppression logic already built for this.
+
+**All three pieces of the "audit runs nightly, unattended, emailing a
+severity-ranked report" acceptance criterion are now complete and
+live-verified**: report generation, email delivery, and nightly
+scheduling.
 
 The "read-only until the audit is solid" gate from the project brief is now
 met: every check so far issues GET requests only, and all seven of the
