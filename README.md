@@ -79,4 +79,24 @@ project ends up producing numbers for.
 
 ## What I'd do differently
 
-TODO — fill in once there's something built to reflect on.
+*Raw draft notes — captured as they happened, to be refined into prose once
+the project is further along.*
+
+- Microsoft's own Graph docs list `Reports.Read.All` as sufficient for the
+  `userRegistrationDetails` endpoint. Live testing against the real tenant
+  proved otherwise — got a 403 with `Authentication_MSGraphPermissionMissing`
+  naming `AuditLog.Read.All` as required. Lesson: verify permission
+  requirements against a live tenant rather than trusting docs alone,
+  especially for less-common endpoints.
+- The Microsoft 365 Developer Program's free sandbox eligibility has
+  tightened — it's no longer automatic just by joining. Personal Microsoft
+  accounts without a Visual Studio Professional/Enterprise subscription or
+  partner program membership got rejected with "you don't currently
+  qualify." Had to use a different account type to get through. Lesson:
+  verify current program eligibility rules before assuming a "free and
+  renewable" resource is still frictionless.
+- Getting from a Windows certificate store object to a file MSAL can
+  actually read wasn't a single documented step — required exporting to
+  PFX via PowerShell, then converting to PEM via OpenSSL. Lesson: budget
+  time for tooling gaps between "the cert exists" and "the cert is usable
+  by your auth library."
