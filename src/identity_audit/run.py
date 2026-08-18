@@ -13,6 +13,11 @@ from identity_audit.auth import get_access_token
 from identity_audit.checks.guest_accounts import find_guest_accounts
 from identity_audit.checks.mfa import find_users_without_mfa
 from identity_audit.checks.privileged_roles import find_privileged_role_holders
+from identity_audit.checks.service_principal_credentials import (
+    CREDENTIAL_EXPIRY_WARNING_DAYS,
+    STATUS_EXPIRED,
+    find_expiring_service_principal_credentials,
+)
 from identity_audit.checks.stale_accounts import (
     STALE_SIGN_IN_THRESHOLD_DAYS,
     find_stale_licensed_users,
@@ -66,6 +71,22 @@ def main() -> int:
         print(
             f"  {user.user_principal_name}  ({user.display_name})  "
             f"roles: {', '.join(user.roles)}"
+        )
+
+    expiring_credentials = find_expiring_service_principal_credentials(client)
+    print(
+        f"\nService principal credentials expiring within "
+        f"{CREDENTIAL_EXPIRY_WARNING_DAYS} days or already expired "
+        f"({len(expiring_credentials)}):"
+    )
+    for cred in expiring_credentials:
+        if cred.status == STATUS_EXPIRED:
+            expiry_desc = f"expired {abs(cred.days_until_expiry)} day(s) ago"
+        else:
+            expiry_desc = f"expires in {cred.days_until_expiry} day(s)"
+        print(
+            f"  {cred.sp_display_name}  ({cred.app_id})  {cred.credential_type}  "
+            f"{expiry_desc}  [{cred.status}]"
         )
 
     return 0
