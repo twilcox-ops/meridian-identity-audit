@@ -11,7 +11,10 @@ TODO: one paragraph, problem-first, before any mention of libraries.
 
 ## Status
 
-Scaffold only — no audit checks or write operations implemented yet.
+Part A's first check — users without MFA registered — is implemented,
+covered by tests that mock Graph pagination and 429 throttling, and
+live-verified against a real tenant. Everything else in Part A, and all of
+Part B, is not started.
 
 ## What this will do
 
