@@ -11,10 +11,15 @@ TODO: one paragraph, problem-first, before any mention of libraries.
 
 ## Status
 
-Part A's first check — users without MFA registered — is implemented,
-covered by tests that mock Graph pagination and 429 throttling, and
-live-verified against a real tenant. Everything else in Part A, and all of
-Part B, is not started.
+Part A's first two checks are implemented, covered by tests that mock Graph
+pagination and 429 throttling, and live-verified against a real tenant:
+
+- Users without MFA registered.
+- Licensed users inactive 90+ days. The live run found 0 stale users in the
+  sandbox tenant — expected, since its test users are fictitious and freshly
+  created rather than long-idle, not evidence the logic never matches.
+
+Everything else in Part A, and all of Part B, is not started.
 
 ## What this will do
 
@@ -58,9 +63,9 @@ and a typed confirmation.
 
 | Scope | Type | Justification |
 | --- | --- | --- |
-| `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. |
+| `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. |
 | `Reports.Read.All` | Application | Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. Microsoft's docs list this as sufficient on its own, but live testing against this tenant showed it is **not** — see `AuditLog.Read.All` below. |
-| `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. |
+| `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. Also covers the stale-account check's `signInActivity` reads on `/users` — live-tested against the tenant, no additional permission was needed there. |
 
 ## Setup
 
