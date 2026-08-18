@@ -5,6 +5,7 @@ venv/
 .env
 logs/
 *.log
+reports/
 .pytest_cache/
 *.egg-info/
 dist/

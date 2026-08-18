@@ -1,7 +1,9 @@
-"""Entry point for Part A: run the audit checks that exist so far.
+"""Entry point for Part A: run every audit check and produce the report.
 
-Console output only for now - a severity-ranked HTML report lands once
-there's more than one check to rank.
+Each check's raw results are printed to console (unchanged from before) and
+also collected into a shared, severity-ranked `Finding` list that gets
+written out as an HTML report. No email or scheduling yet - see
+`identity_audit.report` for the severity model and escalation rules.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from identity_audit.checks.stale_accounts import (
 )
 from identity_audit.config import load_graph_config
 from identity_audit.graph_client import GraphClient
+from identity_audit.report import build_findings, summary_line, write_report
 
 logging.basicConfig(
     level=logging.INFO,
@@ -112,6 +115,18 @@ def main() -> int:
             else f"{device.days_since_check_in} day(s) ago"
         )
         print(f"  {device.display_name}  {compliance}  last check-in: {last_seen}")
+
+    findings = build_findings(
+        mfa_gaps=mfa_gaps,
+        stale_users=stale_users,
+        guests=guests,
+        privileged_users=privileged_users,
+        expiring_credentials=expiring_credentials,
+        ownerless_groups=ownerless_groups,
+        flagged_devices=flagged_devices,
+    )
+    report_path = write_report(findings)
+    print(f"\nWrote severity-ranked report to {report_path} ({summary_line(findings)})")
 
     return 0
 

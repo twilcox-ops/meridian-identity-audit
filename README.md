@@ -39,12 +39,24 @@ tenant:
   0 devices in the tenant — expected, since the sandbox has no
   enrolled/registered devices, not evidence the logic doesn't work.
 
-**Part A's checks are now complete.** The remaining Part A work is the
-nightly-scheduling, severity-ranked HTML report, and email-delivery piece —
-none of that is started yet. The "read-only until the audit is solid" gate
-from the project brief is now met: every check so far issues GET requests
-only, and all seven of the checks the brief asks for exist, are tested, and
-have been run against a real tenant.
+**Part A's checks are now complete, and severity-ranked HTML report
+generation is implemented, tested, and live-verified.** A live run against
+the sandbox tenant correctly produced 16 critical findings (every MFA-less
+user) and 1 warning finding (the sole privileged-role holder — not
+escalated to critical, since that account does have MFA registered), and
+the report rendered correctly in a browser. See "Report severity model"
+below for the ranking logic.
+
+This closes only the report-*generation* part of the "audit runs nightly,
+unattended, emailing a severity-ranked report" acceptance criterion.
+Nightly scheduling and email delivery are still separate, not-yet-built
+pieces — right now the report is a local file only
+(`reports/audit-report.html`), produced by a manual run.
+
+The "read-only until the audit is solid" gate from the project brief is now
+met: every check so far issues GET requests only, and all seven of the
+checks the brief asks for exist, are tested, and have been run against a
+real tenant.
 
 All of Part B is not started.
 
@@ -73,6 +85,32 @@ Graph API allows it, documented where it isn't.
 
 Every write path defaults to `--dry-run`; a real run needs an explicit flag
 and a typed confirmation.
+
+## Report severity model
+
+Findings are ranked into three levels:
+
+- **Critical** — an active exposure right now (no MFA registered) or
+  something that already failed rather than being about to (a service
+  principal credential that's expired, not just expiring).
+- **Warning** — a governance or hygiene gap that raises risk without being
+  an active compromise: stale-but-licensed accounts, ownerless groups,
+  non-compliant devices, credentials nearing expiry, or simply holding a
+  privileged role on its own.
+- **Info** — visibility, not a failure: guest accounts (existing is normal
+  for most orgs; this is about awareness of how long they've been around),
+  and devices that are compliant but just haven't checked in recently.
+
+**Escalation.** A privileged-role finding is bumped to critical if that
+same user also shows up in one of these other checks:
+
+- No MFA registered — an admin account reachable without a second factor.
+- Guest account — an external identity holding elevated internal access.
+- Inactive 90+ days, still licensed — a dormant admin credential nobody's
+  watching but that still works.
+
+The full reasoning, and the code that implements it, lives in
+`src/identity_audit/report.py`.
 
 ## Design constraints
 
