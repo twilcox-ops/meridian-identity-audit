@@ -12,6 +12,7 @@ import sys
 from identity_audit.auth import get_access_token
 from identity_audit.checks.guest_accounts import find_guest_accounts
 from identity_audit.checks.mfa import find_users_without_mfa
+from identity_audit.checks.ownerless_groups import find_ownerless_groups
 from identity_audit.checks.privileged_roles import find_privileged_role_holders
 from identity_audit.checks.service_principal_credentials import (
     CREDENTIAL_EXPIRY_WARNING_DAYS,
@@ -88,6 +89,11 @@ def main() -> int:
             f"  {cred.sp_display_name}  ({cred.app_id})  {cred.credential_type}  "
             f"{expiry_desc}  [{cred.status}]"
         )
+
+    ownerless_groups = find_ownerless_groups(client)
+    print(f"\nGroups with no owner ({len(ownerless_groups)}):")
+    for group in ownerless_groups:
+        print(f"  {group.group_display_name}  ({group.group_id})")
 
     return 0
 
