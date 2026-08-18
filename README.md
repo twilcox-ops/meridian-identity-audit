@@ -70,9 +70,14 @@ live-verified**: report generation, email delivery, and nightly
 scheduling.
 
 The "read-only until the audit is solid" gate from the project brief is now
-met: every check so far issues GET requests only, and all seven of the
-checks the brief asks for exist, are tested, and have been run against a
-real tenant.
+met, held to precisely rather than overstated: the audit issues no
+identity- or directory-mutating writes — no user, group, role, or device is
+ever created, changed, or deleted. `Mail.Send`'s `sendMail` call is a real
+`POST`, so "every check issues GET requests only" is no longer literally
+true, but that POST is a notification side-effect of the report, not a
+state-changing write against the Graph data model the checks read from. All
+seven of the checks the brief asks for exist, are tested, and have been run
+against a real tenant.
 
 All of Part B is not started.
 
@@ -160,6 +165,26 @@ The full reasoning, and the code that implements it, lives in
 TODO once implemented — will cover the Microsoft 365 Developer tenant, the
 Entra ID app registration (certificate upload, no secret), and `.env` from
 `.env.example`.
+
+### GitHub Actions secrets
+
+The nightly workflow (`.github/workflows/nightly-audit.yml`) reads
+everything it needs from repo secrets — Settings → Secrets and variables →
+Actions → New repository secret. Six are required for the workflow to run
+at all:
+
+| Secret | Contents |
+| --- | --- |
+| `GRAPH_CERT_PEM` | Full contents of the certificate's PEM private key file (the one `GRAPH_CERT_PATH` points at locally) — paste the file contents as-is. |
+| `GRAPH_TENANT_ID` | Same value as the local `.env`'s `GRAPH_TENANT_ID`. |
+| `GRAPH_CLIENT_ID` | Same value as the local `.env`'s `GRAPH_CLIENT_ID`. |
+| `GRAPH_CERT_THUMBPRINT` | Same value as the local `.env`'s `GRAPH_CERT_THUMBPRINT`. |
+| `DIGEST_TO` | Report recipient address. |
+| `DIGEST_FROM` | Report sender mailbox — must be one the `Mail.Send`-granted app can send as. |
+
+One more is optional: `HEARTBEAT_URL`, a healthchecks.io (or similar)
+dead-man's-switch ping URL. Omit it and the heartbeat step just no-ops
+rather than failing the run.
 
 ## Architecture
 
