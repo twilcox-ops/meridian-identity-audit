@@ -61,7 +61,9 @@ and a typed confirmation.
 - **Throttling** — honors `Retry-After` on HTTP 429, no fixed sleep.
 - **Least privilege** — starts at `User.Read.All`; every additional
   permission gets a one-line justification here once it's requested.
-- **Batching** — uses Graph's `$batch` endpoint for bulk reads.
+- **Batching** — not implemented yet; planned to use Graph's `$batch`
+  endpoint for bulk reads once there's enough per-run request volume across
+  checks to make it worth measuring.
 - **Audit log** — every write records who ran it, what changed, and the
   before/after state.
 
