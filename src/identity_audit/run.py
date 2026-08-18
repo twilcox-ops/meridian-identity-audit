@@ -10,6 +10,10 @@ import logging
 import sys
 
 from identity_audit.auth import get_access_token
+from identity_audit.checks.device_compliance import (
+    DEVICE_CHECKIN_STALE_THRESHOLD_DAYS,
+    find_noncompliant_or_stale_devices,
+)
 from identity_audit.checks.guest_accounts import find_guest_accounts
 from identity_audit.checks.mfa import find_users_without_mfa
 from identity_audit.checks.ownerless_groups import find_ownerless_groups
@@ -94,6 +98,20 @@ def main() -> int:
     print(f"\nGroups with no owner ({len(ownerless_groups)}):")
     for group in ownerless_groups:
         print(f"  {group.group_display_name}  ({group.group_id})")
+
+    flagged_devices = find_noncompliant_or_stale_devices(client)
+    print(
+        f"\nDevices non-compliant or inactive "
+        f"{DEVICE_CHECKIN_STALE_THRESHOLD_DAYS}+ days ({len(flagged_devices)}):"
+    )
+    for device in flagged_devices:
+        compliance = "compliant" if device.is_compliant else "non-compliant"
+        last_seen = (
+            "never"
+            if device.days_since_check_in is None
+            else f"{device.days_since_check_in} day(s) ago"
+        )
+        print(f"  {device.display_name}  {compliance}  last check-in: {last_seen}")
 
     return 0
 

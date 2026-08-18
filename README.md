@@ -11,8 +11,8 @@ TODO: one paragraph, problem-first, before any mention of libraries.
 
 ## Status
 
-Part A's first six checks are implemented, covered by tests that mock
-Graph pagination and 429 throttling, and live-verified against a real
+All seven of Part A's checks are now implemented, covered by tests that
+mock Graph pagination and 429 throttling, and live-verified against a real
 tenant:
 
 - Users without MFA registered.
@@ -35,8 +35,18 @@ tenant:
   and found 0 ownerless groups among the sandbox's 8 groups, all of which
   have at least one owner. Expected for a small, actively-managed sandbox,
   not evidence the logic doesn't work.
+- Devices that are non-compliant or haven't checked in. The live run found
+  0 devices in the tenant — expected, since the sandbox has no
+  enrolled/registered devices, not evidence the logic doesn't work.
 
-Everything else in Part A, and all of Part B, is not started.
+**Part A's checks are now complete.** The remaining Part A work is the
+nightly-scheduling, severity-ranked HTML report, and email-delivery piece —
+none of that is started yet. The "read-only until the audit is solid" gate
+from the project brief is now met: every check so far issues GET requests
+only, and all seven of the checks the brief asks for exist, are tested, and
+have been run against a real tenant.
+
+All of Part B is not started.
 
 ## What this will do
 
@@ -88,6 +98,7 @@ and a typed confirmation.
 | `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs. |
 | `Application.Read.All` | Application | Needed by the service-principal-credential check to read `passwordCredentials`/`keyCredentials` on `/servicePrincipals` — service principal objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant. |
 | `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time. |
+| `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required. |
 
 ## Setup
 
