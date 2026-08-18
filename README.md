@@ -53,7 +53,10 @@ and a typed confirmation.
 
 ## Permissions
 
-TODO: table of `scope -> justification`, filled in as each one is requested.
+| Scope | Type | Justification |
+| --- | --- | --- |
+| `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. |
+| `Reports.Read.All` | Application | Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. The only alternative Graph accepts for that endpoint is `AuditLog.Read.All`, which also grants read access to sign-in and audit logs the check never touches — `Reports.Read.All` is the narrower of the two options that actually work.|
 
 ## Setup
 
