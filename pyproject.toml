@@ -1,0 +1,27 @@
+[project]
+name = "meridian-identity-audit"
+version = "0.1.0"
+description = "Identity posture audit and lifecycle automation against Microsoft Graph: MFA gaps, stale/guest accounts, privileged role holders, expiring service-principal credentials, and ownerless groups in a nightly severity-ranked report, plus dry-run-first onboarding/offboarding writes."
+requires-python = ">=3.11"
+dependencies = [
+    "msal>=1.28",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+run-audit = "identity_audit.run:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
