@@ -1,15 +1,22 @@
 """Entry point for Part A: run every audit check and produce the report.
 
-Each check's raw results are printed to console (unchanged from before) and
-also collected into a shared, severity-ranked `Finding` list that gets
-written out as an HTML report. No email or scheduling yet - see
-`identity_audit.report` for the severity model and escalation rules.
+Each check's raw results are printed to console and also collected into a
+shared, severity-ranked `Finding` list that gets written out as an HTML
+report and optionally emailed - see `identity_audit.report` for the
+severity model and escalation rules.
+
+The detailed per-check console dump (real UPNs, display names) is suppressed
+under CI (`CI=true`, set automatically by GitHub Actions) - see
+`_print_check_block` below. The full detail is unaffected either way: it's
+always in the HTML report and the emailed copy, both gated separately from
+console output.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from typing import Callable, Sequence, TypeVar
 
 from identity_audit.auth import get_access_token
 from identity_audit.checks.device_compliance import (
@@ -29,6 +36,7 @@ from identity_audit.checks.stale_accounts import (
     STALE_SIGN_IN_THRESHOLD_DAYS,
     find_stale_licensed_users,
 )
+from identity_audit.ci import is_ci_environment
 from identity_audit.config import load_graph_config
 from identity_audit.graph_client import GraphClient
 from identity_audit.mailer import maybe_send_report_email
@@ -46,6 +54,48 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
+
+def _print_check_block(
+    header: str, items: Sequence[T], format_item: Callable[[T], str]
+) -> None:
+    """Print a check's full result block to console - unless running in CI.
+
+    Under CI (`is_ci_environment()`), this whole block - header included -
+    is suppressed. The check module's own `logger.info(...)` summary line
+    (e.g. "MFA check complete: 16 user(s) without MFA registered") is
+    already emitted unconditionally and is safe for a CI log: it's a count,
+    not a list of identities. Locally, this prints exactly as it always
+    has - header, then one formatted line per item.
+    """
+    if is_ci_environment():
+        return
+    print(header)
+    for item in items:
+        print(format_item(item))
+
+
+def _format_credential(cred) -> str:
+    if cred.status == STATUS_EXPIRED:
+        expiry_desc = f"expired {abs(cred.days_until_expiry)} day(s) ago"
+    else:
+        expiry_desc = f"expires in {cred.days_until_expiry} day(s)"
+    return (
+        f"  {cred.sp_display_name}  ({cred.app_id})  {cred.credential_type}  "
+        f"{expiry_desc}  [{cred.status}]"
+    )
+
+
+def _format_device(device) -> str:
+    compliance = "compliant" if device.is_compliant else "non-compliant"
+    last_seen = (
+        "never"
+        if device.days_since_check_in is None
+        else f"{device.days_since_check_in} day(s) ago"
+    )
+    return f"  {device.display_name}  {compliance}  last check-in: {last_seen}"
+
 
 def main() -> int:
     try:
@@ -58,69 +108,66 @@ def main() -> int:
     client = GraphClient(access_token=token)
 
     mfa_gaps = find_users_without_mfa(client)
-    print(f"\nUsers without MFA registered ({len(mfa_gaps)}):")
-    for user in mfa_gaps:
-        print(f"  {user.user_principal_name}  ({user.display_name})")
+    _print_check_block(
+        f"\nUsers without MFA registered ({len(mfa_gaps)}):",
+        mfa_gaps,
+        lambda user: f"  {user.user_principal_name}  ({user.display_name})",
+    )
 
     stale_users = find_stale_licensed_users(client)
-    print(
+    _print_check_block(
         f"\nLicensed users inactive {STALE_SIGN_IN_THRESHOLD_DAYS}+ days "
-        f"({len(stale_users)}):"
+        f"({len(stale_users)}):",
+        stale_users,
+        lambda user: (
+            f"  {user.user_principal_name}  ({user.display_name})  "
+            f"last sign-in: {user.last_sign_in or 'never signed in'}"
+        ),
     )
-    for user in stale_users:
-        last_seen = user.last_sign_in or "never signed in"
-        print(f"  {user.user_principal_name}  ({user.display_name})  last sign-in: {last_seen}")
 
     guests = find_guest_accounts(client)
-    print(f"\nGuest accounts ({len(guests)}):")
-    for guest in guests:
-        print(
+    _print_check_block(
+        f"\nGuest accounts ({len(guests)}):",
+        guests,
+        lambda guest: (
             f"  {guest.user_principal_name}  ({guest.display_name})  "
             f"{guest.days_in_tenant} days in tenant"
-        )
+        ),
+    )
 
     privileged_users = find_privileged_role_holders(client)
-    print(f"\nUsers holding privileged directory roles ({len(privileged_users)}):")
-    for user in privileged_users:
-        print(
+    _print_check_block(
+        f"\nUsers holding privileged directory roles ({len(privileged_users)}):",
+        privileged_users,
+        lambda user: (
             f"  {user.user_principal_name}  ({user.display_name})  "
             f"roles: {', '.join(user.roles)}"
-        )
+        ),
+    )
 
     expiring_credentials = find_expiring_service_principal_credentials(client)
-    print(
+    _print_check_block(
         f"\nService principal credentials expiring within "
         f"{CREDENTIAL_EXPIRY_WARNING_DAYS} days or already expired "
-        f"({len(expiring_credentials)}):"
+        f"({len(expiring_credentials)}):",
+        expiring_credentials,
+        _format_credential,
     )
-    for cred in expiring_credentials:
-        if cred.status == STATUS_EXPIRED:
-            expiry_desc = f"expired {abs(cred.days_until_expiry)} day(s) ago"
-        else:
-            expiry_desc = f"expires in {cred.days_until_expiry} day(s)"
-        print(
-            f"  {cred.sp_display_name}  ({cred.app_id})  {cred.credential_type}  "
-            f"{expiry_desc}  [{cred.status}]"
-        )
 
     ownerless_groups = find_ownerless_groups(client)
-    print(f"\nGroups with no owner ({len(ownerless_groups)}):")
-    for group in ownerless_groups:
-        print(f"  {group.group_display_name}  ({group.group_id})")
+    _print_check_block(
+        f"\nGroups with no owner ({len(ownerless_groups)}):",
+        ownerless_groups,
+        lambda group: f"  {group.group_display_name}  ({group.group_id})",
+    )
 
     flagged_devices = find_noncompliant_or_stale_devices(client)
-    print(
+    _print_check_block(
         f"\nDevices non-compliant or inactive "
-        f"{DEVICE_CHECKIN_STALE_THRESHOLD_DAYS}+ days ({len(flagged_devices)}):"
+        f"{DEVICE_CHECKIN_STALE_THRESHOLD_DAYS}+ days ({len(flagged_devices)}):",
+        flagged_devices,
+        _format_device,
     )
-    for device in flagged_devices:
-        compliance = "compliant" if device.is_compliant else "non-compliant"
-        last_seen = (
-            "never"
-            if device.days_since_check_in is None
-            else f"{device.days_since_check_in} day(s) ago"
-        )
-        print(f"  {device.display_name}  {compliance}  last check-in: {last_seen}")
 
     findings = build_findings(
         mfa_gaps=mfa_gaps,

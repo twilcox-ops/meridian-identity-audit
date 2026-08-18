@@ -1,0 +1,96 @@
+# Nightly Part A audit run via GitHub Actions - same "prove it ran
+# unattended" pattern as Project 1's earthquake-pipeline workflow. No
+# secret values are hardcoded anywhere below - every one is a reference to
+# a secret that has to be created in this repo's Settings -> Secrets and
+# variables -> Actions first. See the required-secrets list at the bottom
+# of this comment block before enabling the schedule.
+#
+# Cert-based auth needs a private key on disk, but nothing on the runner
+# persists between jobs, so GRAPH_CERT_PATH can't point at a real file the
+# way it does locally. The GRAPH_CERT_PEM secret holds the PEM content
+# itself; the first job step writes it to a per-job temp file
+# ($RUNNER_TEMP, wiped when the job ends, never committed, never a repo
+# file) and points GRAPH_CERT_PATH at that path via $GITHUB_ENV for every
+# later step - the private key itself never appears in a workflow log.
+#
+# Same "how would you know if this broke" gotcha as Project 1: GitHub
+# disables scheduled workflows after 60 days of *repository* inactivity,
+# not workflow inactivity - a quiet-but-healthy audit can go dark with no
+# error anywhere in the Actions UI. The heartbeat step pings an external
+# dead-man's-switch (healthchecks.io's free tier works) only on success;
+# that service, not GitHub, is what alerts on the run simply not
+# happening. This step is a carryover of Project 1's pattern, not
+# something Project 3's own acceptance criteria ask for - only "runs
+# nightly, unattended, emailing a report" is in scope there. Included
+# because it's cheap and already proven, not because it's required.
+#
+# Required secrets (Settings -> Secrets and variables -> Actions -> New
+# repository secret), none of which this file contains real values for:
+#   GRAPH_CERT_PEM        - full contents of the certificate's PEM private
+#                            key file (the one GRAPH_CERT_PATH points at
+#                            locally) - paste the file contents as-is.
+#   GRAPH_TENANT_ID        - same value as the local .env's GRAPH_TENANT_ID.
+#   GRAPH_CLIENT_ID        - same value as the local .env's GRAPH_CLIENT_ID.
+#   GRAPH_CERT_THUMBPRINT  - same value as the local .env's
+#                            GRAPH_CERT_THUMBPRINT.
+#   DIGEST_TO              - report recipient address.
+#   DIGEST_FROM            - report sender mailbox (must be one the
+#                            Mail.Send-granted app can send as).
+#   HEARTBEAT_URL           - optional; the healthchecks.io (or similar)
+#                            ping URL. Omit the secret and the heartbeat
+#                            step just no-ops (curl fails, `|| true`
+#                            swallows it) rather than failing the run.
+#
+# Addressed: `run-audit` used to print every finding - real UPNs, display
+# names, role names - to stdout unconditionally, which would have landed
+# in this Actions run log on every scheduled run. `run.py` now checks the
+# `CI` environment variable (GitHub Actions sets `CI=true` on every runner
+# automatically, no setup needed here) and suppresses the detailed
+# per-check console block under CI, keeping only the safe count-only
+# `logger.info(...)` summary line per check. Locally (CI unset), console
+# output is unchanged. The full detail is unaffected either way - it's
+# always in the HTML report and the emailed copy, both gated separately
+# from console output. Keeping this repo private is still the right
+# baseline regardless - this only shrinks what a compromised or
+# accidentally-public Actions log would expose, it doesn't replace repo
+# privacy as a control.
+name: nightly-audit
+
+on:
+  schedule:
+    - cron: "37 6 * * *" # ~nightly, offset off :00 to dodge the midnight-UTC pile-up
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install .
+
+      - name: Stage the certificate secret to a per-job temp file
+        run: |
+          CERT_PATH="$RUNNER_TEMP/graph-cert.pem"
+          printf '%s' "${{ secrets.GRAPH_CERT_PEM }}" > "$CERT_PATH"
+          chmod 600 "$CERT_PATH"
+          echo "GRAPH_CERT_PATH=$CERT_PATH" >> "$GITHUB_ENV"
+
+      - name: Run nightly audit
+        env:
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CERT_THUMBPRINT: ${{ secrets.GRAPH_CERT_THUMBPRINT }}
+          DIGEST_TO: ${{ secrets.DIGEST_TO }}
+          DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+          # GRAPH_CERT_PATH is already in the job environment via
+          # $GITHUB_ENV from the previous step - not repeated here.
+        run: run-audit
+
+      - name: Ping dead-man's-switch heartbeat on success
+        if: success()
+        run: curl -fsS "${{ secrets.HEARTBEAT_URL }}" || true
