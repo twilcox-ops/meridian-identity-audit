@@ -309,3 +309,87 @@ def test_main_dry_run_never_prompts_for_confirmation(monkeypatch):
 
     assert exit_code == 0
     assert captured["dry_run"] is True
+
+
+# --- Confirmation gate for --rollback (tested from the start, not bolted
+# on later - same pattern as the forward flow above) ---
+
+_ROLLBACK_ARGV = [
+    "--user-principal-name", UPN,
+    "--operator", "fictional.operator",
+    "--rollback",
+]
+
+
+def test_rollback_matching_confirmation_proceeds_with_dry_run_false(monkeypatch):
+    captured: dict = {}
+
+    def fake_run_rollback(client, entries, **kwargs):
+        captured["client"] = client
+        captured["entries"] = entries
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(offboarding, "load_graph_config", lambda: object())
+    monkeypatch.setattr(offboarding, "get_access_token", lambda config: "fake-token")
+    monkeypatch.setattr(
+        offboarding, "find_run_entries", lambda path, upn, timestamp=None: ("2024-06-01T00:00:00+00:00", [])
+    )
+    monkeypatch.setattr(offboarding, "run_rollback", fake_run_rollback)
+
+    exit_code = offboarding.main(
+        _ROLLBACK_ARGV + ["--execute"],
+        confirm_fn=lambda prompt: UPN,
+    )
+
+    assert exit_code == 0
+    assert captured["dry_run"] is False
+
+
+def test_rollback_mismatched_confirmation_aborts_before_any_graph_call(monkeypatch):
+    monkeypatch.setattr(offboarding, "load_graph_config", _fail_if_called)
+    monkeypatch.setattr(offboarding, "get_access_token", _fail_if_called)
+    monkeypatch.setattr(offboarding, "find_run_entries", _fail_if_called)
+    monkeypatch.setattr(offboarding, "run_rollback", _fail_if_called)
+
+    captured_entries: list[AuditEntry] = []
+    monkeypatch.setattr(
+        offboarding,
+        "record_audit_entry",
+        lambda entry, path=None: captured_entries.append(entry),
+    )
+
+    exit_code = offboarding.main(
+        _ROLLBACK_ARGV + ["--execute"],
+        confirm_fn=lambda prompt: "not-the-right-upn",
+    )
+
+    assert exit_code == 1
+    assert len(captured_entries) == 1
+    entry = captured_entries[0]
+    assert entry.action == "rollback_aborted"
+    assert entry.result == "aborted"
+    assert entry.dry_run is False
+    assert entry.target == UPN
+
+
+def test_rollback_dry_run_never_prompts_for_confirmation(monkeypatch):
+    captured: dict = {}
+
+    def fake_run_rollback(client, entries, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    # No --execute in argv below, so none of these four should ever run -
+    # proves dry-run skips both the confirmation prompt and real auth.
+    monkeypatch.setattr(offboarding, "load_graph_config", _fail_if_called)
+    monkeypatch.setattr(offboarding, "get_access_token", _fail_if_called)
+    monkeypatch.setattr(
+        offboarding, "find_run_entries", lambda path, upn, timestamp=None: ("2024-06-01T00:00:00+00:00", [])
+    )
+    monkeypatch.setattr(offboarding, "run_rollback", fake_run_rollback)
+
+    exit_code = offboarding.main(_ROLLBACK_ARGV, confirm_fn=_fail_if_called)
+
+    assert exit_code == 0
+    assert captured["dry_run"] is True

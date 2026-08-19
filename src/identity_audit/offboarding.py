@@ -40,8 +40,7 @@ anywhere else in this project. Rather than fake this or silently skip it,
 `offboard_user()` always logs it with `result="not_automated"` so it's
 honest in the audit trail and doesn't look either done or missing.
 
-## Reversibility (documented per the spec, not built as a `--rollback`
-## command - matching onboarding, which doesn't have one either)
+## Reversibility
 
 - **Disable sign-in** - reversible: `PATCH accountEnabled: true` restores
   exactly the prior state.
@@ -59,6 +58,18 @@ honest in the audit trail and doesn't look either done or missing.
 - **Convert mailbox to shared** - the underlying Exchange operation is
   itself administratively reversible, but since nothing here performs the
   forward direction either, reversibility is moot for what's built.
+
+## Rollback
+
+`--rollback` executes the three reversible actions above instead of just
+documenting them - same dry-run default, same typed-confirmation gate,
+same audit trail (entries written as `rollback_<action>`). `revoke_refresh_
+tokens` and `convert_mailbox_to_shared` are correctly reported as "not
+reversible" rather than silently skipped: they simply have no entry in
+`OFFBOARDING_REVERSERS`, so the shared engine in `identity_audit.rollback`
+reports them as such on its own, no special-casing needed here. Which run
+to roll back and the engine itself are shared with onboarding - see
+`identity_audit.rollback`'s module docstring.
 
 ## Dry-run and the accuracy tradeoff that comes with it
 
@@ -107,8 +118,15 @@ from typing import Callable
 
 from identity_audit.audit_trail import AuditEntry, record_audit_entry
 from identity_audit.auth import get_access_token
+from identity_audit.confirmation import confirm_retype
 from identity_audit.config import load_graph_config
 from identity_audit.graph_client import GRAPH_BASE_URL, GraphClient, GraphError
+from identity_audit.rollback import (
+    ReverseFn,
+    RollbackTargetNotFound,
+    find_run_entries,
+    run_rollback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,12 +323,74 @@ def offboard_user(
     return OffboardingResult(user_id=user_id, groups_removed=groups_removed, entries=entries)
 
 
-def _confirm_real_run(user_principal_name: str, confirm_fn: Callable[[str], str] = input) -> bool:
-    typed = confirm_fn(
-        f"Type the exact user principal name to confirm offboarding "
-        f"{user_principal_name} for real: "
+def _reverse_disable_sign_in(client: GraphClient, user_id: str, entry: AuditEntry) -> None:
+    client.patch(
+        f"{GRAPH_BASE_URL}{USERS_PATH}/{user_id}",
+        json_body={"accountEnabled": entry.before["accountEnabled"]},
     )
-    return typed.strip() == user_principal_name
+
+
+def _reverse_remove_from_groups(client: GraphClient, user_id: str, entry: AuditEntry) -> None:
+    group_id = entry.before["group_id"]
+    client.post(
+        f"{GRAPH_BASE_URL}/groups/{group_id}/members/$ref",
+        json_body={"@odata.id": f"{GRAPH_BASE_URL}/directoryObjects/{user_id}"},
+    )
+
+
+def _reverse_reclaim_license(client: GraphClient, user_id: str, entry: AuditEntry) -> None:
+    sku_id = entry.before["sku_id"]
+    client.post(
+        f"{GRAPH_BASE_URL}{USERS_PATH}/{user_id}/assignLicense",
+        json_body={"addLicenses": [{"skuId": sku_id}], "removeLicenses": []},
+    )
+
+
+# revoke_refresh_tokens and convert_mailbox_to_shared are deliberately
+# absent - not reversible, see module docstring. The shared engine reports
+# them as such on its own; no special-casing needed here.
+OFFBOARDING_REVERSERS: dict[str, ReverseFn] = {
+    "disable_sign_in": _reverse_disable_sign_in,
+    "remove_from_groups": _reverse_remove_from_groups,
+    "reclaim_license": _reverse_reclaim_license,
+}
+
+
+def _run_rollback(args: argparse.Namespace, dry_run: bool) -> int:
+    try:
+        resolved_timestamp, entries = find_run_entries(
+            DEFAULT_AUDIT_LOG_PATH, args.user_principal_name, timestamp=args.timestamp
+        )
+    except RollbackTargetNotFound as exc:
+        logger.error(str(exc))
+        return 1
+
+    if dry_run:
+        client = GraphClient(access_token="unused-in-dry-run")
+    else:
+        try:
+            config = load_graph_config()
+            token = get_access_token(config)
+        except RuntimeError as exc:
+            logger.error(str(exc))
+            return 1
+        client = GraphClient(access_token=token)
+
+    outcomes = run_rollback(
+        client,
+        entries,
+        reversers=OFFBOARDING_REVERSERS,
+        resolve_user_id_url=f"{GRAPH_BASE_URL}{USERS_PATH}/{args.user_principal_name}",
+        operator=args.operator,
+        dry_run=dry_run,
+        audit_log_path=DEFAULT_AUDIT_LOG_PATH,
+    )
+
+    print(f"Rolling back run at {resolved_timestamp} for {args.user_principal_name}:")
+    for outcome in outcomes:
+        print(f"  {outcome.action}: {outcome.rollback_result} (was {outcome.original_result})")
+
+    return 0
 
 
 def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input) -> int:
@@ -318,10 +398,12 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
 
-    parser = argparse.ArgumentParser(description="Offboard a user (Part B, dry-run by default).")
+    parser = argparse.ArgumentParser(
+        description="Offboard a user, or roll one back (Part B, dry-run by default)."
+    )
     parser.add_argument("--user-principal-name", required=True)
     parser.add_argument(
-        "--license-sku-id", required=True, help="SKU to reclaim (see scripts/list_license_skus.py)."
+        "--license-sku-id", help="SKU to reclaim (see scripts/list_license_skus.py)."
     )
     parser.add_argument("--operator", required=True, help="Human identity to attribute this run to.")
     parser.add_argument(
@@ -329,17 +411,40 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
         action="store_true",
         help="Make real changes. Without this, the run is a dry run (default).",
     )
+    parser.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Reverse a prior offboarding run instead of offboarding someone new.",
+    )
+    parser.add_argument(
+        "--timestamp",
+        default=None,
+        help="Exact run timestamp to roll back (--rollback only; default: most "
+        "recent run for --user-principal-name).",
+    )
     args = parser.parse_args(argv)
+
+    if not args.rollback and not args.license_sku_id:
+        parser.error("--license-sku-id is required unless --rollback is set")
 
     dry_run = not args.execute
 
     if not dry_run:
-        if not _confirm_real_run(args.user_principal_name, confirm_fn=confirm_fn):
+        prompt_action = (
+            f"rolling back changes for {args.user_principal_name}"
+            if args.rollback
+            else f"offboarding {args.user_principal_name}"
+        )
+        if not confirm_retype(
+            args.user_principal_name,
+            f"Type the exact user principal name to confirm {prompt_action} for real: ",
+            confirm_fn=confirm_fn,
+        ):
             record_audit_entry(
                 AuditEntry(
                     timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     operator=args.operator,
-                    action="offboarding_aborted",
+                    action="rollback_aborted" if args.rollback else "offboarding_aborted",
                     dry_run=False,
                     target=args.user_principal_name,
                     before=None,
@@ -350,6 +455,9 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
             )
             print("Confirmation did not match - aborted, no changes made.")
             return 1
+
+    if args.rollback:
+        return _run_rollback(args, dry_run)
 
     if dry_run:
         # Dry run never calls Graph (see offboard_user) - no reason to force

@@ -94,6 +94,12 @@ confirmed). See "Offboarding reversibility" below and
 `src/identity_audit/offboarding.py`'s docstring for the full account of
 that issue.
 
+Rollback for both onboarding and offboarding is now built and
+live-verified — see "Rollback" below for the feature itself, a real bug
+found and fixed while testing it (rollback initially could target its own
+prior output instead of the original run), and the live `--execute`
+rollback result.
+
 ## What this will do
 
 **Part A — audit (read-only, built first):**
@@ -144,6 +150,84 @@ propagation delay after the two preceding writes, not confirmed as the
 actual cause. No retry loop has been added for this step. Full account in
 `src/identity_audit/offboarding.py`'s docstring.
 
+## Rollback
+
+`--rollback` on both `onboard-user` and `offboard-user` reverses a prior
+run instead of starting a new one — it *executes* the reversibility table
+above rather than just documenting it. Same conventions as everything
+else in this project:
+
+- **Dry-run by default, `--execute` for real**, same typed-confirmation
+  gate (retype the exact UPN) as onboarding's and offboarding's forward
+  flows.
+- **Which run**: `--timestamp` picks an exact one — every entry from a
+  single onboarding/offboarding run already shares one timestamp value,
+  so no new run-identifier scheme was needed. Omitted, it defaults to the
+  most recent run recorded for `--user-principal-name`.
+- **LIFO reversal order**: undoes the last action first (license, then
+  groups, then account state) — the more generally defensible default
+  for any rollback, though none of these particular actions actually
+  depend on each other's order at the Graph API level.
+- **Non-reversible actions are reported as such, not silently skipped**:
+  `revoke_refresh_tokens` and `convert_mailbox_to_shared` show up in
+  rollback output as "not reversible" — they're simply absent from the
+  reversal mapping, so the shared engine reports them on its own with no
+  special-casing needed.
+- Shared between both CLIs via `src/identity_audit/rollback.py` - one
+  engine; each module supplies only its own action → reversal mapping
+  (and, for onboarding, the decision that reversing `create_user` means
+  disabling the account rather than deleting it — documented in
+  `onboarding.py`, not decided silently).
+
+### Bug found and fixed: rollback targeting its own prior output
+
+Found via live testing, not by inspection. A dry-run rollback was run
+first — which correctly writes its own `rollback_*` audit entries, same
+as every dry-run action in this project. A real `--execute` rollback was
+then run against the same user right after. It found the *dry-run
+rollback's own entries* as "the most recent run" instead of the original
+onboarding run, and tried to reverse those — producing double-prefixed
+action names like `rollback_rollback_create_user`, every one reported
+"not reversible" since nothing matches that name in any reversal mapping.
+Zero real Graph calls happened, but nothing was rolled back either — a
+silent no-op dressed up as output, which is exactly what made it easy to
+miss until it was actually run twice in a row.
+
+**Root cause**: `find_run_entries()`'s "most recent run for this user"
+lookup never excluded `rollback_`-prefixed entries from consideration, so
+a prior rollback attempt's own log entries were eligible to be selected
+as the *next* rollback's target.
+
+**Fix**: entries whose `action` starts with `rollback_` are now excluded
+entirely at read time, before they're ever grouped into a candidate run —
+this blocks both the default "most recent" path and an explicit
+`--timestamp` that happens to land on a rollback run, since targeting a
+rollback with another rollback isn't a meaningful operation this engine
+supports at all, not just a case to deprioritize.
+
+**Test**: `test_rollback_never_targets_a_prior_rollbacks_own_entries` in
+`tests/test_rollback.py` reproduces the exact scenario using the real
+`run_rollback()` function, not a hand-built fixture — writes original
+entries, runs a real dry-run rollback against them (confirming via the
+log that it genuinely did write `rollback_*` entries), then proves a
+subsequent lookup still resolves to the original run and correctly
+reverses it end-to-end.
+
+### Live-verified
+
+A real `--execute` rollback against the tenant correctly reversed license
+assignment and user creation (both reported `reversed`). Group removal
+reported `failed` — **not a bug**: the membership had already been
+removed by an earlier offboarding run against the same user, so there was
+nothing left to remove. Confirmed directly rather than assumed:
+`scripts/check_group_membership.py` queried the group's membership list
+directly and confirmed the user genuinely wasn't a member at the time of
+the rollback attempt. The audit trail's `failed` result here is the
+system behaving honestly under already-consistent state, not a defect —
+trying to remove someone from a group they're not in is expected to fail,
+and reporting that plainly, rather than masking it as success, is
+correct.
+
 ## Report severity model
 
 Findings are ranked into three levels:
@@ -191,9 +275,17 @@ The full reasoning, and the code that implements it, lives in
 
 ## Permissions
 
+**Rollback needs no new grant.** Checked, not assumed: every Graph call
+`src/identity_audit/rollback.py`'s reversers make (`GET /users/{id}`,
+`PATCH accountEnabled`, `POST`/`DELETE` on group membership,
+`POST assignLicense`) is the same call onboarding or offboarding already
+makes forward, just invoked in reverse — no permission exists solely for
+rollback. The rows below note where a live rollback run added further
+confirmation.
+
 | Scope | Type | Justification |
 | --- | --- | --- |
-| `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. |
+| `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. Also covers rollback's UPN-to-object-ID resolution (`GET /users/{id}`) — live-confirmed by a real `--execute` rollback run, no new grant needed. |
 | `Reports.Read.All` | Application | Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. Microsoft's docs list this as sufficient on its own, but live testing against this tenant showed it is **not** — see `AuditLog.Read.All` below. |
 | `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. Also covers the stale-account check's `signInActivity` reads on `/users` — live-tested against the tenant, no additional permission was needed there. |
 | `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs. |
@@ -201,9 +293,9 @@ The full reasoning, and the code that implements it, lives in
 | `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time. |
 | `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required. |
 | `Mail.Send` | Application | Needed to send the audit report via `POST /users/{sender}/sendMail`. Distinct from every other permission above: this is the first genuinely **write-capable** grant in the project — everything else is `*.Read.*`. Confirmed by live testing end-to-end: the email was both accepted by Graph and confirmed received in the mailbox, not just a 202 response. As granted, it's unscoped to a single mailbox — app-only `Mail.Send` allows sending as any user in the tenant, not just the configured sender. See "What I'd do differently" for why that's a known tradeoff, not something addressed in this portfolio version. |
-| `User.ReadWrite.All` | Application | Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Partially live-verified: a real onboarding `--execute` run against the tenant successfully created a user and successfully assigned a license. Not yet confirmed sufficient in the same fully-tested sense as the Part A rows above, since the same run's group-add step failed (see `GroupMember.ReadWrite.All` below), the onboarding flow hasn't completed end-to-end, and none of offboarding's uses of this permission have been live-tested at all yet. |
+| `User.ReadWrite.All` | Application | Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Also covers rollback's use of the same two calls in reverse (`PATCH accountEnabled` to disable/re-enable, `assignLicense` to remove/re-add). Live-verified: a real onboarding `--execute` run successfully created a user and assigned a license; a real `--execute` rollback run then successfully reversed both (license removal and the create-user-reversal disable both reported `reversed`). Onboarding's own group-add step and full end-to-end flow are still the one piece of this permission's use not yet fully live-verified (see `GroupMember.ReadWrite.All` below). |
 | `User.RevokeSessions.All` | Application | Needed by offboarding for `POST /users/{id}/revokeSignInSessions` (revoke refresh tokens) — **not covered by `User.ReadWrite.All`**. This was assumed correct the first time and turned out wrong: Graph's own permissions table for this specific action lists `User.RevokeSessions.All` as the *only* Application permission, with the higher-privileged-alternative column reading "Not available" for Application (the broader options Graph does show, e.g. `Directory.ReadWrite.All`, apply only to the Delegated permission row). Caught and corrected during development by checking the docs directly rather than assuming `User.ReadWrite.All`'s broad coverage extended here. A distinct, new grant — not yet live-tested. |
-| `GroupMember.ReadWrite.All` | Application | Needed by onboarding for `POST /groups/{id}/members/$ref` (add to group) and by offboarding for `DELETE /groups/{id}/members/{id}/$ref` (remove from group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for both endpoints. No new grant needed for offboarding's use beyond what onboarding already requires. **Not yet live-confirmed sufficient for either direction**: onboarding's real `--execute` run's group-add calls failed, but against placeholder GUIDs from the example config, not real group IDs — the failure is consistent with an invalid/nonexistent resource, not a permission denial, so this remains a docs-based justification pending a successful run against a real group ID. Offboarding's use of this permission (removal) hasn't been live-tested at all yet. |
+| `GroupMember.ReadWrite.All` | Application | Needed by onboarding for `POST /groups/{id}/members/$ref` (add to group) and by offboarding for `DELETE /groups/{id}/members/{id}/$ref` (remove from group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for both endpoints. Also covers rollback's use of both calls in reverse (onboarding's `add_to_group` reverses via the same `DELETE`; offboarding's `remove_from_groups` reverses via the same `POST`). Onboarding's real `--execute` run's group-add calls failed, but against placeholder GUIDs from the example config, not real group IDs — inconclusive on its own. A real `--execute` rollback of that onboarding run then attempted the `add_to_group` reversal (`DELETE .../members/$ref`) against a real group ID — the call reached Graph and wasn't blocked by a permission error; it failed because the user had already been removed from that group by an intervening offboarding run (confirmed directly via `scripts/check_group_membership.py`, not assumed) — evidence pointing toward this permission being sufficient, though not yet a clean success on a real group ID to call it fully confirmed. |
 
 ## Setup
 
@@ -300,3 +392,20 @@ the project is further along.*
   successful retry tells you the code isn't broken, it doesn't tell you
   why the first call failed — don't let it read as more resolved than
   it is.
+- Rollback initially could target its own prior output. A dry-run
+  rollback writes real `rollback_*` audit entries, same as every dry-run
+  action here; a real rollback run right after picked up *those* as "the
+  most recent run" instead of the original onboarding run, and tried to
+  reverse them - producing action names like `rollback_rollback_create_
+  user`, every one reported "not reversible." Zero real Graph calls
+  happened, but nothing was actually rolled back either - a silent no-op
+  dressed up as output, only caught by running the CLI twice in a row
+  during live testing, not by reading the code. Fixed by excluding any
+  `rollback_`-prefixed entry from ever being selected as a rollback
+  target, with a test that reproduces the exact sequence (see
+  "Rollback" above for the full account). Lesson: any system that writes
+  audit entries for its own corrective actions needs to make sure those
+  entries can't later be mistaken for the thing being corrected -
+  "log everything" and "don't let the log confuse the next run" are two
+  different requirements, and satisfying the first doesn't satisfy the
+  second for free.

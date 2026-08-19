@@ -52,6 +52,29 @@ one JSON line to a local audit file (default `logs/onboarding-audit.jsonl`)
 so it survives past the console/log-stream scrolling away. The generated
 temporary password is deliberately never written to the audit trail or
 logged anywhere, plaintext or otherwise - only the fact that one was set.
+
+## Rollback
+
+`--rollback` reverses a prior run instead of starting a new one - same
+dry-run default, same typed-confirmation gate, same audit trail (entries
+written as `rollback_<action>`). Which run: `--timestamp` picks an exact
+one (every entry from a single run already shares one timestamp value, so
+no new run-identifier scheme was needed); omitted, it defaults to the most
+recent run recorded for `--user-principal-name`. The engine itself -
+finding the run, dispatching each entry to its reverser or reporting it as
+not reversible - lives in `identity_audit.rollback`, shared with
+offboarding; only the three reversers below, and what "create" reverses
+to, belong to this module.
+
+`create_user`'s reversal **disables the account rather than deleting it**
+- a deliberate choice, not the only option: it reuses the exact mechanism
+`offboarding.py`'s own `disable_sign_in` already relies on and is already
+documented as reversible, rather than introducing `DELETE /users/{id}`
+(itself only a *soft* delete, needing its own separate restore call and a
+30-day window this project doesn't otherwise touch) as a second,
+asymmetric way to remove access. `add_to_group` reverses via the same
+`$ref` removal offboarding uses; `assign_license` reverses via
+`assignLicense`'s `removeLicenses`.
 """
 
 from __future__ import annotations
@@ -69,8 +92,15 @@ from typing import Callable
 
 from identity_audit.audit_trail import AuditEntry, record_audit_entry
 from identity_audit.auth import get_access_token
+from identity_audit.confirmation import confirm_retype
 from identity_audit.config import load_graph_config
 from identity_audit.graph_client import GRAPH_BASE_URL, GraphClient, GraphError
+from identity_audit.rollback import (
+    ReverseFn,
+    RollbackTargetNotFound,
+    find_run_entries,
+    run_rollback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -254,12 +284,66 @@ def onboard_user(
     )
 
 
-def _confirm_real_run(user_principal_name: str, confirm_fn: Callable[[str], str] = input) -> bool:
-    typed = confirm_fn(
-        f"Type the exact user principal name to confirm creating "
-        f"{user_principal_name} for real: "
+def _reverse_create_user(client: GraphClient, user_id: str, entry: AuditEntry) -> None:
+    """Undo "create" by disabling, not deleting - see module docstring."""
+    client.patch(f"{GRAPH_BASE_URL}{USERS_PATH}/{user_id}", json_body={"accountEnabled": False})
+
+
+def _reverse_add_to_group(client: GraphClient, user_id: str, entry: AuditEntry) -> None:
+    group_id = entry.after["group_id"]
+    client.delete(f"{GRAPH_BASE_URL}/groups/{group_id}/members/{user_id}/$ref")
+
+
+def _reverse_assign_license(client: GraphClient, user_id: str, entry: AuditEntry) -> None:
+    sku_id = entry.after["sku_id"]
+    client.post(
+        f"{GRAPH_BASE_URL}{USERS_PATH}/{user_id}/assignLicense",
+        json_body={"addLicenses": [], "removeLicenses": [sku_id]},
     )
-    return typed.strip() == user_principal_name
+
+
+ONBOARDING_REVERSERS: dict[str, ReverseFn] = {
+    "create_user": _reverse_create_user,
+    "add_to_group": _reverse_add_to_group,
+    "assign_license": _reverse_assign_license,
+}
+
+
+def _run_rollback(args: argparse.Namespace, dry_run: bool) -> int:
+    try:
+        resolved_timestamp, entries = find_run_entries(
+            DEFAULT_AUDIT_LOG_PATH, args.user_principal_name, timestamp=args.timestamp
+        )
+    except RollbackTargetNotFound as exc:
+        logger.error(str(exc))
+        return 1
+
+    if dry_run:
+        client = GraphClient(access_token="unused-in-dry-run")
+    else:
+        try:
+            config = load_graph_config()
+            token = get_access_token(config)
+        except RuntimeError as exc:
+            logger.error(str(exc))
+            return 1
+        client = GraphClient(access_token=token)
+
+    outcomes = run_rollback(
+        client,
+        entries,
+        reversers=ONBOARDING_REVERSERS,
+        resolve_user_id_url=f"{GRAPH_BASE_URL}{USERS_PATH}/{args.user_principal_name}",
+        operator=args.operator,
+        dry_run=dry_run,
+        audit_log_path=DEFAULT_AUDIT_LOG_PATH,
+    )
+
+    print(f"Rolling back run at {resolved_timestamp} for {args.user_principal_name}:")
+    for outcome in outcomes:
+        print(f"  {outcome.action}: {outcome.rollback_result} (was {outcome.original_result})")
+
+    return 0
 
 
 def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input) -> int:
@@ -267,11 +351,13 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
 
-    parser = argparse.ArgumentParser(description="Onboard a new hire (Part B, dry-run by default).")
-    parser.add_argument("--display-name", required=True)
+    parser = argparse.ArgumentParser(
+        description="Onboard a new hire, or roll one back (Part B, dry-run by default)."
+    )
+    parser.add_argument("--display-name")
     parser.add_argument("--user-principal-name", required=True)
-    parser.add_argument("--department", required=True)
-    parser.add_argument("--license-sku-id", required=True)
+    parser.add_argument("--department")
+    parser.add_argument("--license-sku-id")
     parser.add_argument("--operator", required=True, help="Human identity to attribute this run to.")
     parser.add_argument(
         "--department-groups",
@@ -284,17 +370,43 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
         action="store_true",
         help="Make real changes. Without this, the run is a dry run (default).",
     )
+    parser.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Reverse a prior onboarding run instead of creating a new one.",
+    )
+    parser.add_argument(
+        "--timestamp",
+        default=None,
+        help="Exact run timestamp to roll back (--rollback only; default: most "
+        "recent run for --user-principal-name).",
+    )
     args = parser.parse_args(argv)
+
+    if not args.rollback and not (args.display_name and args.department and args.license_sku_id):
+        parser.error(
+            "--display-name, --department, and --license-sku-id are required "
+            "unless --rollback is set"
+        )
 
     dry_run = not args.execute
 
     if not dry_run:
-        if not _confirm_real_run(args.user_principal_name, confirm_fn=confirm_fn):
+        prompt_action = (
+            f"rolling back changes for {args.user_principal_name}"
+            if args.rollback
+            else f"creating {args.user_principal_name}"
+        )
+        if not confirm_retype(
+            args.user_principal_name,
+            f"Type the exact user principal name to confirm {prompt_action} for real: ",
+            confirm_fn=confirm_fn,
+        ):
             record_audit_entry(
                 AuditEntry(
                     timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     operator=args.operator,
-                    action="onboarding_aborted",
+                    action="rollback_aborted" if args.rollback else "onboarding_aborted",
                     dry_run=False,
                     target=args.user_principal_name,
                     before=None,
@@ -305,6 +417,9 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
             )
             print("Confirmation did not match - aborted, no changes made.")
             return 1
+
+    if args.rollback:
+        return _run_rollback(args, dry_run)
 
     department_groups = load_department_group_mapping(args.department_groups)
 
