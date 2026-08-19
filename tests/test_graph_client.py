@@ -24,10 +24,14 @@ class FakeSession:
 
     def __init__(self, responses):
         self._responses = list(responses)
-        self.calls = []  # list of (url, params)
+        self.calls = []  # list of (url, params_or_body)
 
     def get(self, url, headers=None, params=None):
         self.calls.append((url, params))
+        return self._responses.pop(0)
+
+    def post(self, url, headers=None, json=None):
+        self.calls.append((url, json))
         return self._responses.pop(0)
 
 
@@ -104,3 +108,82 @@ def test_get_pages_raises_on_non_retryable_error_status():
         assert "403" in str(exc)
     else:
         raise AssertionError("expected GraphError for a 403 response")
+
+
+def test_batch_correlates_by_id_not_response_order():
+    # Graph doesn't guarantee sub-responses come back in request order -
+    # this response is deliberately reversed to prove correlation is by id.
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "responses": [
+                        {"id": "2", "status": 200, "body": {"value": ["second"]}},
+                        {"id": "1", "status": 404, "body": {"error": {"code": "NotFound"}}},
+                    ]
+                },
+            )
+        ]
+    )
+    client = GraphClient(access_token="fake-token", session=session, sleep=lambda _: None)
+
+    results = client.batch(
+        [
+            {"id": "1", "url": "/groups/group-1/owners?$select=id"},
+            {"id": "2", "url": "/groups/group-2/owners?$select=id"},
+        ]
+    )
+
+    assert results["1"] == {"status": 404, "body": {"error": {"code": "NotFound"}}}
+    assert results["2"] == {"status": 200, "body": {"value": ["second"]}}
+    assert len(session.calls) == 1  # one POST for two sub-requests
+
+
+def test_batch_chunks_at_the_20_request_limit():
+    sub_requests = [
+        {"id": str(i), "url": f"/groups/group-{i}/owners?$select=id"} for i in range(25)
+    ]
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "responses": [
+                        {"id": str(i), "status": 200, "body": {"value": []}} for i in range(20)
+                    ]
+                },
+            ),
+            FakeResponse(
+                200,
+                {
+                    "responses": [
+                        {"id": str(i), "status": 200, "body": {"value": []}}
+                        for i in range(20, 25)
+                    ]
+                },
+            ),
+        ]
+    )
+    client = GraphClient(access_token="fake-token", session=session, sleep=lambda _: None)
+
+    results = client.batch(sub_requests)
+
+    assert len(results) == 25
+    assert len(session.calls) == 2  # 25 requests -> chunks of 20 + 5
+    first_batch_url, first_batch_body = session.calls[0]
+    assert first_batch_url == "https://graph.microsoft.com/v1.0/$batch"
+    assert len(first_batch_body["requests"]) == 20
+    assert len(session.calls[1][1]["requests"]) == 5
+
+
+def test_batch_raises_on_outer_batch_post_failure():
+    session = FakeSession([FakeResponse(400, {"error": {"code": "InvalidBatch"}})])
+    client = GraphClient(access_token="fake-token", session=session, sleep=lambda _: None)
+
+    try:
+        client.batch([{"id": "1", "url": "/groups/group-1/owners?$select=id"}])
+    except Exception as exc:
+        assert "400" in str(exc)
+    else:
+        raise AssertionError("expected GraphError when the $batch POST itself fails")

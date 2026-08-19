@@ -178,9 +178,14 @@ The full reasoning, and the code that implements it, lives in
 - **Throttling** — honors `Retry-After` on HTTP 429, no fixed sleep.
 - **Least privilege** — starts at `User.Read.All`; every additional
   permission gets a one-line justification here once it's requested.
-- **Batching** — not implemented yet; planned to use Graph's `$batch`
-  endpoint for bulk reads once there's enough per-run request volume across
-  checks to make it worth measuring.
+- **Batching** — implemented for the ownerless-groups check specifically,
+  via `GraphClient.batch()`. Not applied elsewhere: no other Part A check
+  has the same per-item N+1 fan-out at scale — the privileged-role check
+  has a structurally similar two-step shape (list roles, then members per
+  role), but the outer list there is a handful of *activated* directory
+  roles, not every group in the tenant, so the benefit would be much
+  smaller and it wasn't touched. See Measurements below for the actual
+  numbers.
 - **Audit log** — every write records who ran it, what changed, and the
   before/after state.
 
@@ -232,8 +237,22 @@ TODO: diagram once there's a shape to draw.
 
 ## Measurements
 
-TODO: batching improvement, throttle-recovery behavior, whatever else this
-project ends up producing numbers for.
+**Batching — ownerless-groups check, live run against the tenant:**
+
+| | Graph calls | Breakdown |
+| --- | --- | --- |
+| Before batching | 9 | 1 groups-list call + 8 individual owner-lookup calls (one per group) |
+| After batching | 2 | 1 groups-list call + 1 `$batch` call covering all 8 owner lookups |
+
+**9 → 2 calls, a 78% reduction** ((9 − 2) / 9), confirmed by the live log
+line `Batched 8 request(s) into 1 $batch call(s)`. This is for an
+8-group tenant specifically — the reduction scales with group count, not
+a fixed percentage: `1 + ceil(N/20)` calls after batching vs. `1 + N`
+before, so the improvement gets more dramatic the more groups a tenant
+has, up to the point batching's own 20-per-call chunking kicks in.
+
+Throttle-recovery behavior and any other numbers this project produces
+are still TODO.
 
 ## What I'd do differently
 

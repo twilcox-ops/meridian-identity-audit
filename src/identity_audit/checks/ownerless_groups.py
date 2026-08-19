@@ -4,19 +4,38 @@ Like the privileged-role check, group ownership isn't a single flat query -
 Graph models it as two steps:
 
 1. `GET /groups` - list every group in the tenant.
-2. `GET /groups/{id}/owners` - list the owners of each group, one call per
-   group.
+2. Look up the owners of each group.
 
-Unlike the privileged-role check, the outer list here isn't small and
-bounded - a tenant typically has only a handful of *activated* directory
-roles, but every group in the tenant is fair game here, which can run into
-the hundreds or thousands. That makes this check's call volume roughly N+1
-Graph requests for N groups, each independently paginated and
-throttle-handled through GraphClient. This is exactly the kind of fan-out
-Graph's `$batch` endpoint (bundling up to 20 requests per round trip) is
-built for, and the check most likely to actually trigger a real 429 in a
-tenant with many groups - worth revisiting once batching exists (see README
-Design constraints); not addressed here.
+Step 2 used to be `GET /groups/{id}/owners`, one call per group - N+1 Graph
+requests for N groups, the check most likely to trigger a real 429 in a
+tenant with many groups. It now goes through `GraphClient.batch()` instead:
+every group's owner lookup becomes one sub-request in a `$batch` call,
+chunked at Graph's 20-per-batch limit, so N groups costs `ceil(N/20)`
+requests instead of N.
+
+**The individual-call path has been fully removed, not kept as a
+fallback.** It only ever existed because batching didn't exist yet - the
+check's own docstring said as much ("worth revisiting once batching
+exists... not addressed here"). Keeping both would mean two code paths
+answering the same question with no correctness difference between them
+(batching handles partial per-group failure correctly, see below), just
+double the tests and double the surface area to keep in sync for zero
+benefit. This is the one and only path now.
+
+Each owner sub-request asks for `$top=1`, not a full page: this check only
+needs to know whether a group has *any* owner, not how many, so Graph
+returning at most one is enough to answer that - and it's the smallest
+payload that still answers it correctly. A first page that comes back
+empty is conclusive proof of zero owners on its own (Graph fills pages
+before creating a `@odata.nextLink`; an empty first page is never followed
+by a non-empty one), so no further pagination per group is needed at all,
+independent of the `$top=1` optimization.
+
+A group whose owner sub-request comes back non-2xx is logged and *skipped*
+- not silently counted as ownerless. Treating "the lookup failed" the same
+as "the lookup succeeded and found nothing" would turn a transient error
+into a false security finding, which is worse than an incomplete result
+this run.
 
 Requires the `GroupMember.Read.All` application permission - the least
 privileged of the three Graph accepts for both `/groups` and
@@ -50,9 +69,11 @@ def find_ownerless_groups(
 ) -> list[OwnerlessGroup]:
     """Return every group with zero owners.
 
-    `page_size` sets `$top` on the initial request of both the groups-list
-    call and every per-group owners call, so tests can force pagination on
-    either leg without a real tenant.
+    `page_size` sets `$top` on the initial groups-list request, so tests
+    can force pagination on that leg without a real tenant. It no longer
+    applies to owner lookups - those are now batched, one sub-request per
+    group asking for `$top=1` regardless of `page_size` (see module
+    docstring for why that's always correct here).
     """
     groups_url = f"{GRAPH_BASE_URL}{GROUPS_PATH}"
     groups_params: dict[str, object] = {"$select": _GROUP_SELECT_FIELDS}
@@ -63,19 +84,43 @@ def find_ownerless_groups(
     for page in client.get_pages(groups_url, params=groups_params):
         groups.extend(page)
 
+    if not groups:
+        logger.info("Ownerless-group check complete: 0 of 0 group(s) have no owner")
+        return []
+
+    sub_requests = [
+        {
+            "id": group["id"],
+            "url": f"{GROUPS_PATH}/{group['id']}/owners?$select={_OWNER_SELECT_FIELDS}&$top=1",
+        }
+        for group in groups
+        if group.get("id")
+    ]
+    batch_results = client.batch(sub_requests)
+
     results: list[OwnerlessGroup] = []
     for group in groups:
         group_id = group.get("id", "")
-        owners_url = f"{GRAPH_BASE_URL}{GROUPS_PATH}/{group_id}/owners"
-        owners_params: dict[str, object] = {"$select": _OWNER_SELECT_FIELDS}
-        if page_size is not None:
-            owners_params["$top"] = page_size
+        sub_result = batch_results.get(group_id)
 
-        owner_count = 0
-        for page in client.get_pages(owners_url, params=owners_params):
-            owner_count += len(page)
+        if sub_result is None:
+            logger.warning(
+                "No batch response for group %s - skipping, not counted either way",
+                group_id,
+            )
+            continue
 
-        if owner_count == 0:
+        if sub_result["status"] >= 400:
+            logger.warning(
+                "Owner lookup for group %s failed with status %s - skipping, "
+                "not counted as ownerless",
+                group_id,
+                sub_result["status"],
+            )
+            continue
+
+        owners = sub_result["body"].get("value", [])
+        if not owners:
             results.append(
                 OwnerlessGroup(
                     group_display_name=group.get("displayName", ""),

@@ -1,6 +1,6 @@
-"""Thin Microsoft Graph HTTP client: pagination, throttling, and the
+"""Thin Microsoft Graph HTTP client: pagination, throttling, the
 single-request verbs (GET-one, POST, PATCH, DELETE) offboarding/onboarding
-need alongside the paginated GETs the Part A checks use.
+need, and `$batch` for bundling many independent GETs into one round trip.
 
 Every request is logged with its status code and, for paginated GETs, the
 number of items returned - no response bodies, no PII beyond what a log
@@ -26,6 +26,12 @@ import requests
 logger = logging.getLogger(__name__)
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+BATCH_PATH = "/$batch"
+
+# Graph's hard limit on requests per $batch call - more than this and the
+# batch POST itself is rejected, so `batch()` chunks rather than assuming
+# the caller already knows to.
+MAX_BATCH_REQUESTS = 20
 
 # Only used if Graph sends a 429 with no Retry-After header at all, which
 # shouldn't happen in practice - this is a safety net, not the normal path.
@@ -120,6 +126,53 @@ class GraphClient:
             url_for_logging=url,
         )
         return self._finish(response, "DELETE", url)
+
+    def batch(self, sub_requests: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+        """Send GET requests as one or more POSTs to `$batch`, chunked to
+        Graph's `MAX_BATCH_REQUESTS`-per-call limit.
+
+        `sub_requests` is a list of `{"id": str, "url": str}`, where `url`
+        is relative to the Graph base (e.g. `/groups/{id}/owners?$select=id`)
+        - what `$batch` itself expects, unlike every other method here,
+        which takes a full URL.
+
+        Returns `{id: {"status": int, "body": dict}}` for every request,
+        merged across however many chunked POSTs it took. Correlation is by
+        `id`, not response order - Graph does not guarantee sub-responses
+        come back in the order the sub-requests were sent.
+
+        A non-2xx sub-response never raises: partial failure inside a batch
+        is the normal case this method exists to handle, not exceptional.
+        The caller decides what a failed sub-request means. `GraphError` is
+        only raised if a batch POST itself fails outright (reused from
+        `post()`) - a whole-batch failure is different in kind from one
+        sub-request failing.
+        """
+        results: dict[str, dict[str, Any]] = {}
+        chunk_count = 0
+
+        for chunk_start in range(0, len(sub_requests), MAX_BATCH_REQUESTS):
+            chunk_count += 1
+            chunk = sub_requests[chunk_start : chunk_start + MAX_BATCH_REQUESTS]
+            payload = {
+                "requests": [
+                    {"id": item["id"], "method": "GET", "url": item["url"]}
+                    for item in chunk
+                ]
+            }
+            response = self.post(f"{GRAPH_BASE_URL}{BATCH_PATH}", json_body=payload)
+            for sub_response in response.json().get("responses", []):
+                results[sub_response["id"]] = {
+                    "status": sub_response.get("status"),
+                    "body": sub_response.get("body") or {},
+                }
+
+        logger.info(
+            "Batched %d request(s) into %d $batch call(s)",
+            len(sub_requests),
+            chunk_count,
+        )
+        return results
 
     def _finish(self, response: requests.Response, method: str, url: str) -> requests.Response:
         """Shared outcome handling for every single-request verb: log the
