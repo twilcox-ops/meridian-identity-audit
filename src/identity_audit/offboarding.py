@@ -75,6 +75,24 @@ here - pulling someone out of a privileged role via this same code path
 would need `RoleManagement.ReadWrite.Directory`, not requested, and
 deserves its own explicit decision rather than being a side effect of
 "remove from groups."
+
+## Known issue: transient 409 on license reclaim right after disable/revoke
+
+A live `--execute` run hit a 409 on the `reclaim_license` step, immediately
+after `disable_sign_in` and `revoke_refresh_tokens` had both already
+succeeded against the same user. Manually re-issuing the identical
+`assignLicense` call moments later, with no code changes, succeeded with a
+200. That's evidence the call itself and the permission are both fine -
+but it's evidence from a successful *retry*, not from the original
+failure: the 409's actual response body was never captured (the retry was
+a plain re-run, not a diagnostic one), so the specific `error.code` Graph
+gave the first time is unknown. What's documented here is the honest
+extent of it: a transient 409 can occur on this step right after
+disable+revoke, a retry appears to resolve it, and this is *consistent
+with* replication/propagation delay in the directory following the two
+preceding writes - not confirmed as the root cause, just the explanation
+that fits the evidence available. No retry loop has been added for this
+step - this is a documented known issue, not yet a handled one.
 """
 
 from __future__ import annotations

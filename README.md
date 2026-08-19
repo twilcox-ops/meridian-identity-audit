@@ -79,16 +79,20 @@ state-changing write against the Graph data model the checks read from. All
 seven of the checks the brief asks for exist, are tested, and have been run
 against a real tenant.
 
-Both pieces of Part B are now built, dry-run tested, with partial live
-verification: onboarding (create user, add to department groups, assign
-license) has had a real `--execute` run succeed for user creation and
-license assignment against the tenant, though the group-add step and the
-overall flow haven't completed end-to-end yet. Offboarding (disable
-sign-in, revoke refresh tokens, remove from groups, reclaim the license,
-convert mailbox to shared) is implemented and dry-run tested but has not
-yet had a real `--execute` run against the tenant at all — see
-"Offboarding reversibility" below and the Permissions table for what's
-still pending before it can be.
+Both pieces of Part B are now built and dry-run tested. Onboarding (create
+user, add to department groups, assign license) has had a real `--execute`
+run succeed for user creation and license assignment against the tenant,
+though the group-add step and the overall flow haven't completed
+end-to-end yet — see the Permissions table for what's still pending
+there. Offboarding (disable sign-in, revoke refresh tokens, remove from
+groups, reclaim the license, convert mailbox to shared) has now had a
+full real `--execute` run succeed end-to-end against the tenant — disable,
+revoke, both group removals, and the correctly-not-automated mailbox step
+all completed as designed — with one known transient issue on the
+license-reclaim step (a 409 that a manual retry resolved, root cause not
+confirmed). See "Offboarding reversibility" below and
+`src/identity_audit/offboarding.py`'s docstring for the full account of
+that issue.
 
 ## What this will do
 
@@ -128,6 +132,17 @@ be documented precisely:
 | Remove from groups | Yes | `POST /groups/{id}/members/$ref` (the same call onboarding uses to add) re-adds the user to each group ID the audit trail recorded before removal. |
 | Reclaim the license | Yes, with a caveat | `assignLicense`'s `addLicenses` re-assigns the same SKU — but if the tenant's SKU pool has no free seats left by the time someone reverses it, that fails for licensing-inventory reasons, not a Graph limitation. |
 | Convert mailbox to shared | Not automated at all | There's no Microsoft Graph endpoint for mailbox type conversion — it's an Exchange Online administrative operation, requiring Exchange's own `Exchange.ManageAsApp` application permission on a separate auth surface this project has never used. Not faked or silently skipped: every offboarding run logs this action with `result="not_automated"`. |
+
+**Live-verified end-to-end.** A full real `--execute` offboarding run
+succeeded against the tenant: disable, revoke, both group removals, and
+the mailbox step (correctly `not_automated`) all completed as designed.
+One known transient issue: the license-reclaim step hit a 409 immediately
+after disable+revoke; a manual retry of the identical call succeeded with
+no code changes. The original 409's error body was never captured, so
+this is **known but not root-caused** — consistent with directory
+propagation delay after the two preceding writes, not confirmed as the
+actual cause. No retry loop has been added for this step. Full account in
+`src/identity_audit/offboarding.py`'s docstring.
 
 ## Report severity model
 
@@ -252,3 +267,17 @@ the project is further along.*
   worth calling out unprompted in an interview rather than waiting to be
   asked, and the first thing to fix before this pattern touched a real
   production tenant.
+- A live offboarding run hit a 409 on the license-reclaim step,
+  immediately after disable-sign-in and revoke-refresh-tokens had both
+  already succeeded against the same user. A manual retry of the
+  identical call, no code changes, succeeded with a 200 — evidence the
+  call and permission are fine, but evidence from a successful *retry*,
+  not from the original failure: the 409's actual response body was never
+  captured, so Graph's stated reason for it is unknown. This is **known
+  but not root-caused** — consistent with directory propagation delay
+  right after two preceding writes to the same user, not confirmed as the
+  actual cause. No retry loop has been added for this step; it's
+  documented as an open issue, not treated as solved. Lesson: a
+  successful retry tells you the code isn't broken, it doesn't tell you
+  why the first call failed — don't let it read as more resolved than
+  it is.
