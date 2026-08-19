@@ -1,12 +1,15 @@
-"""Thin Microsoft Graph HTTP client: pagination, throttling, and now a
-single-request POST path (for calls like sendMail that don't paginate).
+"""Thin Microsoft Graph HTTP client: pagination, throttling, and the
+single-request verbs (GET-one, POST, PATCH, DELETE) offboarding/onboarding
+need alongside the paginated GETs the Part A checks use.
 
-Every request is logged with its status code and, for GETs, the number of
-items returned - no response bodies, no PII beyond what a log line needs to
-say "this call happened and returned N records". HTTP 429 is handled by
-waiting exactly as long as the `Retry-After` header says before retrying
-the same request - never a fixed sleep, never an immediate retry. That
-retry loop is shared between GET and POST rather than duplicated.
+Every request is logged with its status code and, for paginated GETs, the
+number of items returned - no response bodies, no PII beyond what a log
+line needs to say "this call happened and returned N records". HTTP 429 is
+handled by waiting exactly as long as the `Retry-After` header says before
+retrying the same request - never a fixed sleep, never an immediate retry.
+That retry loop is shared across every verb rather than duplicated, and so
+is the "log the outcome, raise GraphError on non-2xx" handling for the four
+single-request verbs (`_finish`).
 
 The `requests.Session` (and the sleep function) are injectable so tests can
 prove the pagination and throttling logic without a real tenant.
@@ -81,24 +84,53 @@ class GraphClient:
             next_url = payload.get("@odata.nextLink")
             next_params = None
 
-    def post(self, url: str, json_body: dict[str, Any]) -> requests.Response:
-        """POST once (no pagination), honoring 429/Retry-After like `get_pages`.
+    def get(self, url: str, params: dict[str, Any] | None = None) -> requests.Response:
+        """GET a single resource (not a paginated collection) - see `get_pages`
+        for anything that returns Graph's `value` array."""
+        response = self._with_429_retry(
+            lambda: self._session.get(url, headers=self._headers, params=params),
+            method="GET",
+            url_for_logging=url,
+        )
+        return self._finish(response, "GET", url)
 
-        Raises `GraphError` on a non-2xx response, same as `get_pages` -
-        the caller decides whether a failed send is fatal or just logged.
-        """
+    def post(self, url: str, json_body: dict[str, Any]) -> requests.Response:
+        """POST once (no pagination), honoring 429/Retry-After like `get_pages`."""
         response = self._with_429_retry(
             lambda: self._session.post(url, headers=self._headers, json=json_body),
             method="POST",
             url_for_logging=url,
         )
+        return self._finish(response, "POST", url)
+
+    def patch(self, url: str, json_body: dict[str, Any]) -> requests.Response:
+        """PATCH once, honoring 429/Retry-After like every other verb here."""
+        response = self._with_429_retry(
+            lambda: self._session.patch(url, headers=self._headers, json=json_body),
+            method="PATCH",
+            url_for_logging=url,
+        )
+        return self._finish(response, "PATCH", url)
+
+    def delete(self, url: str) -> requests.Response:
+        """DELETE once, honoring 429/Retry-After like every other verb here."""
+        response = self._with_429_retry(
+            lambda: self._session.delete(url, headers=self._headers),
+            method="DELETE",
+            url_for_logging=url,
+        )
+        return self._finish(response, "DELETE", url)
+
+    def _finish(self, response: requests.Response, method: str, url: str) -> requests.Response:
+        """Shared outcome handling for every single-request verb: log the
+        result, raise `GraphError` on a non-2xx response. The caller decides
+        whether a failure is fatal or just logged and continued past.
+        """
         status = response.status_code
-
         if status >= 400:
-            logger.error("POST %s -> %s", _strip_query(url), status)
+            logger.error("%s %s -> %s", method, _strip_query(url), status)
             raise GraphError(f"Graph request failed with status {status}")
-
-        logger.info("POST %s -> %s", _strip_query(url), status)
+        logger.info("%s %s -> %s", method, _strip_query(url), status)
         return response
 
     def _request_with_retry(

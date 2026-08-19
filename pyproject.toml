@@ -15,6 +15,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 run-audit = "identity_audit.run:main"
 onboard-user = "identity_audit.onboarding:main"
+offboard-user = "identity_audit.offboarding:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

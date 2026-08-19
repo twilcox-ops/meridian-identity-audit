@@ -79,7 +79,16 @@ state-changing write against the Graph data model the checks read from. All
 seven of the checks the brief asks for exist, are tested, and have been run
 against a real tenant.
 
-All of Part B is not started.
+Both pieces of Part B are now built, dry-run tested, with partial live
+verification: onboarding (create user, add to department groups, assign
+license) has had a real `--execute` run succeed for user creation and
+license assignment against the tenant, though the group-add step and the
+overall flow haven't completed end-to-end yet. Offboarding (disable
+sign-in, revoke refresh tokens, remove from groups, reclaim the license,
+convert mailbox to shared) is implemented and dry-run tested but has not
+yet had a real `--execute` run against the tenant at all — see
+"Offboarding reversibility" below and the Permissions table for what's
+still pending before it can be.
 
 ## What this will do
 
@@ -106,6 +115,19 @@ Graph API allows it, documented where it isn't.
 
 Every write path defaults to `--dry-run`; a real run needs an explicit flag
 and a typed confirmation.
+
+## Offboarding reversibility
+
+Per-action, not a general statement — the project brief asks for this to
+be documented precisely:
+
+| Action | Reversible via Graph? | How / why not |
+| --- | --- | --- |
+| Disable sign-in | Yes | `PATCH /users/{id}` with `accountEnabled: true` restores the exact prior state. |
+| Revoke refresh tokens | Not as an action | No Graph call un-revokes a specific session — those tokens are invalidated permanently. Not a lasting lockout, though: a still-enabled account lets the user sign in again immediately and get a fresh valid session. |
+| Remove from groups | Yes | `POST /groups/{id}/members/$ref` (the same call onboarding uses to add) re-adds the user to each group ID the audit trail recorded before removal. |
+| Reclaim the license | Yes, with a caveat | `assignLicense`'s `addLicenses` re-assigns the same SKU — but if the tenant's SKU pool has no free seats left by the time someone reverses it, that fails for licensing-inventory reasons, not a Graph limitation. |
+| Convert mailbox to shared | Not automated at all | There's no Microsoft Graph endpoint for mailbox type conversion — it's an Exchange Online administrative operation, requiring Exchange's own `Exchange.ManageAsApp` application permission on a separate auth surface this project has never used. Not faked or silently skipped: every offboarding run logs this action with `result="not_automated"`. |
 
 ## Report severity model
 
@@ -159,8 +181,9 @@ The full reasoning, and the code that implements it, lives in
 | `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time. |
 | `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required. |
 | `Mail.Send` | Application | Needed to send the audit report via `POST /users/{sender}/sendMail`. Distinct from every other permission above: this is the first genuinely **write-capable** grant in the project — everything else is `*.Read.*`. Confirmed by live testing end-to-end: the email was both accepted by Graph and confirmed received in the mailbox, not just a 202 response. As granted, it's unscoped to a single mailbox — app-only `Mail.Send` allows sending as any user in the tenant, not just the configured sender. See "What I'd do differently" for why that's a known tradeoff, not something addressed in this portfolio version. |
-| `User.ReadWrite.All` | Application | Needed by onboarding (Part B) for `POST /users` (create) and `POST /users/{id}/assignLicense` — Graph's own documentation lists this as the least-privileged permission for both. Partially live-verified: a real `--execute` run against the tenant successfully created a user and successfully assigned a license. Not yet confirmed sufficient in the same fully-tested sense as the Part A rows above, since the same run's group-add step failed (see `GroupMember.ReadWrite.All` below) and the onboarding flow hasn't completed end-to-end. |
-| `GroupMember.ReadWrite.All` | Application | Needed by onboarding (Part B) for `POST /groups/{id}/members/$ref` (add to group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for this endpoint. **Not yet live-confirmed sufficient**: a real `--execute` run's group-add calls failed, but against placeholder GUIDs from the example config, not real group IDs — the failure is consistent with an invalid/nonexistent resource, not a permission denial, so this remains a docs-based justification pending a successful run against a real group ID. |
+| `User.ReadWrite.All` | Application | Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Partially live-verified: a real onboarding `--execute` run against the tenant successfully created a user and successfully assigned a license. Not yet confirmed sufficient in the same fully-tested sense as the Part A rows above, since the same run's group-add step failed (see `GroupMember.ReadWrite.All` below), the onboarding flow hasn't completed end-to-end, and none of offboarding's uses of this permission have been live-tested at all yet. |
+| `User.RevokeSessions.All` | Application | Needed by offboarding for `POST /users/{id}/revokeSignInSessions` (revoke refresh tokens) — **not covered by `User.ReadWrite.All`**. This was assumed correct the first time and turned out wrong: Graph's own permissions table for this specific action lists `User.RevokeSessions.All` as the *only* Application permission, with the higher-privileged-alternative column reading "Not available" for Application (the broader options Graph does show, e.g. `Directory.ReadWrite.All`, apply only to the Delegated permission row). Caught and corrected during development by checking the docs directly rather than assuming `User.ReadWrite.All`'s broad coverage extended here. A distinct, new grant — not yet live-tested. |
+| `GroupMember.ReadWrite.All` | Application | Needed by onboarding for `POST /groups/{id}/members/$ref` (add to group) and by offboarding for `DELETE /groups/{id}/members/{id}/$ref` (remove from group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for both endpoints. No new grant needed for offboarding's use beyond what onboarding already requires. **Not yet live-confirmed sufficient for either direction**: onboarding's real `--execute` run's group-add calls failed, but against placeholder GUIDs from the example config, not real group IDs — the failure is consistent with an invalid/nonexistent resource, not a permission denial, so this remains a docs-based justification pending a successful run against a real group ID. Offboarding's use of this permission (removal) hasn't been live-tested at all yet. |
 
 ## Setup
 

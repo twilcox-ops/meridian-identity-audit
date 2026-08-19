@@ -62,11 +62,12 @@ import logging
 import secrets
 import string
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from identity_audit.audit_trail import AuditEntry, record_audit_entry
 from identity_audit.auth import get_access_token
 from identity_audit.config import load_graph_config
 from identity_audit.graph_client import GRAPH_BASE_URL, GraphClient, GraphError
@@ -81,30 +82,10 @@ _TEMP_PASSWORD_LENGTH = 20
 
 
 @dataclass(frozen=True)
-class AuditEntry:
-    timestamp: str
-    operator: str
-    action: str
-    dry_run: bool
-    target: str
-    before: dict | None
-    after: dict | None
-    result: str  # "simulated" | "success" | "failed" | "aborted"
-
-
-@dataclass(frozen=True)
 class OnboardingResult:
     user_id: str | None  # None if dry-run or the create call itself failed
     temporary_password: str | None  # None if dry-run; never logged or audited
     entries: list[AuditEntry]
-
-
-def record_audit_entry(entry: AuditEntry, path: Path = DEFAULT_AUDIT_LOG_PATH) -> None:
-    """Log an audit entry and append it as one JSON line to the audit file."""
-    logger.info("AUDIT %s", json.dumps(asdict(entry)))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(asdict(entry)) + "\n")
 
 
 def load_department_group_mapping(
@@ -319,7 +300,8 @@ def main(argv: list[str] | None = None, confirm_fn: Callable[[str], str] = input
                     before=None,
                     after=None,
                     result="aborted",
-                )
+                ),
+                path=DEFAULT_AUDIT_LOG_PATH,
             )
             print("Confirmation did not match - aborted, no changes made.")
             return 1
