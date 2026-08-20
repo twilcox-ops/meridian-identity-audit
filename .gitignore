@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 venv/
 .env
+*.pem
+*.pfx
+*.key
 config/department_groups.json
 logs/
 *.log
