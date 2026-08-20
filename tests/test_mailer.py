@@ -9,27 +9,7 @@ from __future__ import annotations
 from identity_audit.graph_client import GRAPH_BASE_URL, GraphClient
 from identity_audit.mailer import maybe_send_report_email, send_report_email
 
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    """Returns queued responses to `.post()` in order; records every call."""
-
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []  # (url, json_body)
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append((url, json))
-        return self._responses.pop(0)
+from .fakes import FakeResponse, FakeSessionPostOnly as FakeSession
 
 
 def test_send_report_email_posts_expected_sendmail_payload():

@@ -16,29 +16,7 @@ from identity_audit.checks.ownerless_groups import (
 )
 from identity_audit.graph_client import GraphClient
 
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []  # (verb, url, payload)
-
-    def get(self, url, headers=None, params=None):
-        self.calls.append(("GET", url, params))
-        return self._responses.pop(0)
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append(("POST", url, json))
-        return self._responses.pop(0)
+from .fakes import FakeResponse, FakeSessionAllVerbs as FakeSession
 
 
 def _client(session: FakeSession) -> GraphClient:

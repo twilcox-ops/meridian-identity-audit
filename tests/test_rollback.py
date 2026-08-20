@@ -24,37 +24,11 @@ from identity_audit.rollback import (
     run_rollback,
 )
 
+from .fakes import FakeResponse, FakeSessionAllVerbs as FakeSession
+
 UPN = "fictional.user@example.test"
 RESOLVE_URL = f"https://graph.microsoft.com/v1.0/users/{UPN}"
 NOW = datetime(2024, 6, 1, tzinfo=timezone.utc)
-
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []  # (verb, url, payload)
-
-    def get(self, url, headers=None, params=None):
-        self.calls.append(("GET", url, params))
-        return self._responses.pop(0)
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append(("POST", url, json))
-        return self._responses.pop(0)
-
-    def patch(self, url, headers=None, json=None):
-        self.calls.append(("PATCH", url, json))
-        return self._responses.pop(0)
 
 
 def _client(session: FakeSession) -> GraphClient:

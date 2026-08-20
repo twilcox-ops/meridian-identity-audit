@@ -13,25 +13,7 @@ from identity_audit.checks.privileged_roles import (
 )
 from identity_audit.graph_client import GraphClient
 
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []
-
-    def get(self, url, headers=None, params=None):
-        self.calls.append((url, params))
-        return self._responses.pop(0)
+from .fakes import FakeResponse, FakeSession
 
 
 def test_find_privileged_role_holders_aggregates_multi_role_user():

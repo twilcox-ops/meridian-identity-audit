@@ -20,43 +20,11 @@ from identity_audit.audit_trail import AuditEntry
 from identity_audit.graph_client import GraphClient
 from identity_audit.offboarding import OffboardingResult, offboard_user
 
+from .fakes import FakeResponse, FakeSessionAllVerbs as FakeSession
+
 NOW = datetime(2024, 6, 1, tzinfo=timezone.utc)
 
 UPN = "fictional.leaver@example.test"
-
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    """Records every call, across all four verbs, in call order."""
-
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls: list[tuple] = []  # (verb, url, payload)
-
-    def get(self, url, headers=None, params=None):
-        self.calls.append(("GET", url, params))
-        return self._responses.pop(0)
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append(("POST", url, json))
-        return self._responses.pop(0)
-
-    def patch(self, url, headers=None, json=None):
-        self.calls.append(("PATCH", url, json))
-        return self._responses.pop(0)
-
-    def delete(self, url, headers=None):
-        self.calls.append(("DELETE", url, None))
-        return self._responses.pop(0)
 
 
 def _client(session: FakeSession) -> GraphClient:

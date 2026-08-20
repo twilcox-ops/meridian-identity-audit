@@ -10,25 +10,7 @@ from __future__ import annotations
 from identity_audit.checks.mfa import UserMfaStatus, find_users_without_mfa
 from identity_audit.graph_client import GraphClient
 
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []
-
-    def get(self, url, headers=None, params=None):
-        self.calls.append((url, params))
-        return self._responses.pop(0)
+from .fakes import FakeResponse, FakeSession
 
 
 def test_find_users_without_mfa_paginates_and_maps_fields():

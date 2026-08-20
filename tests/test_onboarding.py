@@ -27,34 +27,13 @@ from identity_audit.onboarding import (
     record_audit_entry,
 )
 
+from .fakes import FakeResponse, FakeSessionPostOnlyGuarded as FakeSession
+
 NOW = datetime(2024, 6, 1, tzinfo=timezone.utc)
 
 FICTIONAL_DEPARTMENT_GROUPS = {
     "Fictional Engineering": ["group-eng-1", "group-eng-2"],
 }
-
-
-class FakeResponse:
-    def __init__(self, status_code, json_data=None, headers=None):
-        self.status_code = status_code
-        self._json_data = json_data or {}
-        self.headers = headers or {}
-
-    def json(self):
-        return self._json_data
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = []  # (url, json_body)
-
-    def post(self, url, headers=None, json=None):
-        self.calls.append((url, json))
-        return self._responses.pop(0)
-
-    def get(self, url, headers=None, params=None):  # pragma: no cover - unused here
-        raise AssertionError("onboarding should never issue a GET")
 
 
 def _client(session: FakeSession) -> GraphClient:
