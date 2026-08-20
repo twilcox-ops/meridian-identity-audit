@@ -134,7 +134,9 @@ Output: an HTML report, severity-ranked, emailed on a schedule.
 **Part B — writes (dry-run by default, built after Part A is solid):**
 
 Onboarding: create user, assign groups from a department mapping, assign a
-license, log every action.
+license, log every action. The new user's password is a random one
+generated via Python's `secrets` module, shown once at the console, and
+deliberately never written to the audit trail or any log.
 
 Offboarding: disable sign-in, revoke refresh tokens, remove from groups,
 reclaim the license, convert the mailbox to shared. Reversible where the
@@ -309,18 +311,68 @@ confirmation.
 
 | Scope | Type | Justification |
 | --- | --- | --- |
-| `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. Also covers rollback's UPN-to-object-ID resolution (`GET /users/{id}`) — live-confirmed by a real `--execute` rollback run, no new grant needed. |
-| `Reports.Read.All` | Application | Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. Microsoft's docs list this as sufficient on its own, but live testing against this tenant showed it is **not** — see `AuditLog.Read.All` below. |
-| `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. Also covers the stale-account check's `signInActivity` reads on `/users` — live-tested against the tenant, no additional permission was needed there. |
-| `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs: `GET /directoryRoles -> 200, 2 item(s)` followed by two `GET .../members` calls, both 200, in `logs/audit-run-2026-08-20.log`. |
-| `Application.Read.All` | Application | Needed by the service-principal-credential check to read `passwordCredentials`/`keyCredentials` on `/servicePrincipals` — service principal objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant: `GET /servicePrincipals -> 200` across both pages (172 service principals total) in `logs/audit-run-2026-08-20.log`. |
-| `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time: `GET /groups -> 200, 8 item(s)` followed by a 200 on the batched owner-lookup `POST /$batch`, in `logs/audit-run-2026-08-20.log`. |
-| `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required: `GET /devices -> 200, 0 item(s)` in `logs/audit-run-2026-08-20.log`. |
-| `Mail.Send` | Application | Needed to send the audit report via `POST /users/{sender}/sendMail`. Distinct from every other permission above: this is the first genuinely **write-capable** grant in the project — everything else is `*.Read.*`. Confirmed by live testing end-to-end: the email was both accepted by Graph and confirmed received in the mailbox, not just a 202 response. As granted, it's unscoped to a single mailbox — app-only `Mail.Send` allows sending as any user in the tenant, not just the configured sender. See "What I'd do differently" for why that's a known tradeoff, not something addressed in this portfolio version. |
-| `User.ReadWrite.All` | Application | Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Also covers rollback's use of the same two calls in reverse (`PATCH accountEnabled` to disable/re-enable, `assignLicense` to remove/re-add). Live-verified: a real onboarding `--execute` run successfully created a user, added them to a group, and assigned a license, all in the same run (see `logs/onboarding-audit.jsonl`, entries 1-3); a real `--execute` rollback run then successfully reversed both (license removal and the create-user-reversal disable both reported `reversed`). |
-| `User.RevokeSessions.All` | Application | Needed by offboarding for `POST /users/{id}/revokeSignInSessions` (revoke refresh tokens) — **not covered by `User.ReadWrite.All`**. This was assumed correct the first time and turned out wrong: Graph's own permissions table for this specific action lists `User.RevokeSessions.All` as the *only* Application permission, with the higher-privileged-alternative column reading "Not available" for Application (the broader options Graph does show, e.g. `Directory.ReadWrite.All`, apply only to the Delegated permission row). Caught and corrected during development by checking the docs directly rather than assuming `User.ReadWrite.All`'s broad coverage extended here. Live-verified: a real offboarding `--execute` run's `revoke_refresh_tokens` call succeeded (`"dry_run": false, "result": "success"` in `logs/offboarding-audit.jsonl`), consistent with the "Offboarding reversibility" section above. |
-| `GroupMember.ReadWrite.All` | Application | Needed by onboarding for `POST /groups/{id}/members/$ref` (add to group) and by offboarding for `DELETE /groups/{id}/members/{id}/$ref` (remove from group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for both endpoints. Also covers rollback's use of both calls in reverse (onboarding's `add_to_group` reverses via the same `DELETE`; offboarding's `remove_from_groups` reverses via the same `POST`). Live-verified: a real onboarding `--execute` run's `add_to_group` call succeeded (`POST /groups/{id}/members/$ref`) against a real group ID (`40780cb0-...`, present in `config/department_groups.json`), confirmed by `"result": "success"` in `logs/onboarding-audit.jsonl`. A later real `--execute` rollback of that onboarding run then attempted the `add_to_group` reversal (`DELETE .../members/$ref`) — the call again reached Graph and wasn't blocked by a permission error; it failed only because the user had already been removed from that group by an intervening offboarding run (confirmed directly via `scripts/check_group_membership.py`, not assumed). |
-| `Organization.Read.All` | Application | Needed by `scripts/list_license_skus.py` to call `/subscribedSkus` — a standalone diagnostic script, not part of any check or Part B action itself; it exists purely to find a real license SKU ID to pass as onboarding's `--license-sku-id`, since SKU IDs are opaque GUIDs with no way to guess them. Confirmed by live testing: the script 403'd without this permission, then succeeded (200, listed the tenant's real SKUs) once it was granted and admin-consented. |
+| `User.Read.All` | Application | Baseline directory read for resolving user identities in every check's findings; also covers rollback's UPN-to-object-ID lookup. |
+| `Reports.Read.All` | Application | Needed by the MFA-registration check to call `userRegistrationDetails`, though live testing showed it's not sufficient alone. |
+| `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails`; also covers the stale-account check's `signInActivity` reads. |
+| `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to list activated directory roles and their members. |
+| `Application.Read.All` | Application | Needed by the service-principal-credential check to read credential expiry on `/servicePrincipals`. |
+| `GroupMember.Read.All` | Application | Needed by the ownerless-group check to list groups and their owners. |
+| `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices`. |
+| `Mail.Send` | Application | Needed to send the audit report via `sendMail` — the only write-capable grant among Part A's permissions. |
+| `User.ReadWrite.All` | Application | Needed by onboarding (create user, assign license) and offboarding (disable sign-in, reclaim license), and by rollback's reverse of both. |
+| `User.RevokeSessions.All` | Application | Needed by offboarding to revoke refresh tokens — a distinct grant, not covered by `User.ReadWrite.All`. |
+| `GroupMember.ReadWrite.All` | Application | Needed by onboarding (add to group) and offboarding (remove from group), widening the read-only grant above. |
+| `Organization.Read.All` | Application | Needed by the standalone `scripts/list_license_skus.py` diagnostic tool, not by any check or Part B action itself. |
+
+## Permission justifications — detail
+
+### `User.Read.All`
+
+Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. Also covers rollback's UPN-to-object-ID resolution (`GET /users/{id}`) — live-confirmed by a real `--execute` rollback run, no new grant needed.
+
+### `Reports.Read.All`
+
+Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. Microsoft's docs list this as sufficient on its own, but live testing against this tenant showed it is **not** — see `AuditLog.Read.All` below.
+
+### `AuditLog.Read.All`
+
+Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. Also covers the stale-account check's `signInActivity` reads on `/users` — live-tested against the tenant, no additional permission was needed there.
+
+### `RoleManagement.Read.Directory`
+
+Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs: `GET /directoryRoles -> 200, 2 item(s)` followed by two `GET .../members` calls, both 200, in `logs/audit-run-2026-08-20.log`.
+
+### `Application.Read.All`
+
+Needed by the service-principal-credential check to read `passwordCredentials`/`keyCredentials` on `/servicePrincipals` — service principal objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant: `GET /servicePrincipals -> 200` across both pages (172 service principals total) in `logs/audit-run-2026-08-20.log`.
+
+### `GroupMember.Read.All`
+
+Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time: `GET /groups -> 200, 8 item(s)` followed by a 200 on the batched owner-lookup `POST /$batch`, in `logs/audit-run-2026-08-20.log`.
+
+### `Device.Read.All`
+
+Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required: `GET /devices -> 200, 0 item(s)` in `logs/audit-run-2026-08-20.log`.
+
+### `Mail.Send`
+
+Needed to send the audit report via `POST /users/{sender}/sendMail`. Distinct from every other permission above: this is the first genuinely **write-capable** grant in the project — everything else is `*.Read.*`. Confirmed by live testing end-to-end: the email was both accepted by Graph and confirmed received in the mailbox, not just a 202 response. As granted, it's unscoped to a single mailbox — app-only `Mail.Send` allows sending as any user in the tenant, not just the configured sender. See "What I'd do differently" for why that's a known tradeoff, not something addressed in this portfolio version.
+
+### `User.ReadWrite.All`
+
+Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Also covers rollback's use of the same two calls in reverse (`PATCH accountEnabled` to disable/re-enable, `assignLicense` to remove/re-add). Live-verified: a real onboarding `--execute` run successfully created a user, added them to a group, and assigned a license, all in the same run (see `logs/onboarding-audit.jsonl`, entries 1-3); a real `--execute` rollback run then successfully reversed both (license removal and the create-user-reversal disable both reported `reversed`).
+
+### `User.RevokeSessions.All`
+
+Needed by offboarding for `POST /users/{id}/revokeSignInSessions` (revoke refresh tokens) — **not covered by `User.ReadWrite.All`**. This was assumed correct the first time and turned out wrong: Graph's own permissions table for this specific action lists `User.RevokeSessions.All` as the *only* Application permission, with the higher-privileged-alternative column reading "Not available" for Application (the broader options Graph does show, e.g. `Directory.ReadWrite.All`, apply only to the Delegated permission row). Caught and corrected during development by checking the docs directly rather than assuming `User.ReadWrite.All`'s broad coverage extended here. Live-verified: a real offboarding `--execute` run's `revoke_refresh_tokens` call succeeded (`"dry_run": false, "result": "success"` in `logs/offboarding-audit.jsonl`), consistent with the "Offboarding reversibility" section above.
+
+### `GroupMember.ReadWrite.All`
+
+Needed by onboarding for `POST /groups/{id}/members/$ref` (add to group) and by offboarding for `DELETE /groups/{id}/members/{id}/$ref` (remove from group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for both endpoints. Also covers rollback's use of both calls in reverse (onboarding's `add_to_group` reverses via the same `DELETE`; offboarding's `remove_from_groups` reverses via the same `POST`). Live-verified: a real onboarding `--execute` run's `add_to_group` call succeeded (`POST /groups/{id}/members/$ref`) against a real group ID (`40780cb0-...`, present in `config/department_groups.json`), confirmed by `"result": "success"` in `logs/onboarding-audit.jsonl`. A later real `--execute` rollback of that onboarding run then attempted the `add_to_group` reversal (`DELETE .../members/$ref`) — the call again reached Graph and wasn't blocked by a permission error; it failed only because the user had already been removed from that group by an intervening offboarding run (confirmed directly via `scripts/check_group_membership.py`, not assumed).
+
+### `Organization.Read.All`
+
+Needed by `scripts/list_license_skus.py` to call `/subscribedSkus` — a standalone diagnostic script, not part of any check or Part B action itself; it exists purely to find a real license SKU ID to pass as onboarding's `--license-sku-id`, since SKU IDs are opaque GUIDs with no way to guess them. Confirmed by live testing: the script 403'd without this permission, then succeeded (200, listed the tenant's real SKUs) once it was granted and admin-consented.
 
 ## Setup
 
