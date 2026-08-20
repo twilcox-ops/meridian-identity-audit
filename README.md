@@ -381,8 +381,14 @@ rather than failing the run.
 
 ## Architecture
 
-No diagram — out of scope for this pass, see the note at the end on
-whether one would earn its place. A textual description instead.
+A textual description first, then a diagram scoped to the two call shapes
+that are genuinely hard to hold in your head from text alone — see the
+note further down for why — the shared list-then-per-item pattern behind
+`privileged_roles.py` and `ownerless_groups.py`, and the dependency
+fan-in where `onboarding.py`/`offboarding.py` both depend on
+`rollback.py`, `audit_trail.py`, and `confirmation.py`. A diagram of the
+full module tree was judged unnecessary: the prose below already covers
+that adequately.
 
 **Foundation everything else depends on:**
 
@@ -465,6 +471,38 @@ pull from `rollback.py`, `audit_trail.py`, and `confirmation.py`. A
 diagram scoped to just those relationships would earn its place. A
 diagram of the full module list wouldn't tell a reader much more than
 this list already does.
+
+Scoped to just those two shapes:
+
+```mermaid
+flowchart LR
+    subgraph Shape1 [" "]
+        direction TB
+        PR_List["GET /directoryRoles<br/>list activated roles"]
+        PR_Members["GET /directoryRoles/{id}/members<br/>one call per role"]
+        PR_List -->|"for each role"| PR_Members
+
+        OG_List["GET /groups<br/>list every group"]
+        OG_Batch["POST /$batch<br/>one owner-lookup sub-request per group,<br/>chunked at 20/call"]
+        OG_List -->|"for each group"| OG_Batch
+    end
+
+    subgraph Shape2 [" "]
+        direction TB
+        Onboard["onboarding.py"]
+        Offboard["offboarding.py"]
+        Rollback["rollback.py<br/>reverses prior audit entries"]
+        Audit["audit_trail.py<br/>shared AuditEntry + JSONL writer"]
+        Confirm["confirmation.py<br/>typed-retype-the-UPN gate"]
+
+        Onboard --> Rollback
+        Onboard --> Audit
+        Onboard --> Confirm
+        Offboard --> Rollback
+        Offboard --> Audit
+        Offboard --> Confirm
+    end
+```
 
 ## Measurements
 
