@@ -190,6 +190,8 @@ else in this project:
 
 ### Bug found and fixed: rollback targeting its own prior output
 
+Full write-up: [`docs/rollback-bug-writeup.md`](docs/rollback-bug-writeup.md).
+
 Found via live testing, not by inspection. A dry-run rollback was run
 first — which correctly writes its own `rollback_*` audit entries, same
 as every dry-run action in this project. A real `--execute` rollback was
