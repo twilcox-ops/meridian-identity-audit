@@ -24,37 +24,43 @@ All seven of Part A's checks are now implemented, covered by tests that
 mock Graph pagination and 429 throttling, and live-verified against a real
 tenant:
 
-- Users without MFA registered.
-- Licensed users inactive 90+ days. The live run found 0 stale users in the
-  sandbox tenant — expected, since its test users are fictitious and freshly
-  created rather than long-idle, not evidence the logic never matches.
-- Guest accounts and how long they've been in the tenant. The live run
-  found 0 guests — expected for a fresh sandbox with no external invites
-  sent, not evidence the logic doesn't work.
-- Users holding privileged directory roles. The live run found the expected
-  sandbox tenant admin as the sole privileged-role holder.
-- Service principals with credentials nearing expiry. The live run also
-  incidentally proved pagination against a real multi-page response — 168
-  service principals across 2 pages — and found 0 credentials nearing
-  expiry, expected for a fresh sandbox populated mostly with
-  Microsoft-provisioned service principals rather than long-lived
-  custom app registrations.
-- Groups with no owner. The live run confirmed the N+1 call pattern flagged
-  during development — 1 groups-list call plus 8 per-group owner checks —
-  and found 0 ownerless groups among the sandbox's 8 groups, all of which
-  have at least one owner. Expected for a small, actively-managed sandbox,
-  not evidence the logic doesn't work.
-- Devices that are non-compliant or haven't checked in. The live run found
-  0 devices in the tenant — expected, since the sandbox has no
-  enrolled/registered devices, not evidence the logic doesn't work.
+- Users without MFA registered. Live-verified: 17 found in the tenant's
+  real user population (`logs/audit-run-2026-08-20.log`).
+- Licensed users inactive 90+ days. Live-verified: 1 found — a test
+  account from earlier Part B testing that's never signed in, a real
+  positive match rather than a clean run finding nothing
+  (`logs/audit-run-2026-08-20.log`).
+- Guest accounts and how long they've been in the tenant. Live-verified:
+  0 found — expected for a sandbox with no external invites sent, not
+  evidence the logic doesn't work (`logs/audit-run-2026-08-20.log`).
+- Users holding privileged directory roles. Live-verified: 1 holder found
+  across the tenant's 2 activated directory roles — the sandbox tenant
+  admin, holding Global Administrator (`logs/audit-run-2026-08-20.log`).
+- Service principals with credentials nearing expiry. Live-verified: 172
+  service principals across 2 pages (real pagination, not just a forced
+  small `$top`), 0 credentials nearing expiry or expired — expected for a
+  sandbox populated mostly with Microsoft-provisioned service principals
+  rather than long-lived custom app registrations
+  (`logs/audit-run-2026-08-20.log`).
+- Groups with no owner. Live-verified: 8 groups, 0 ownerless, resolved via
+  the batched call path — 1 groups-list call plus 1 `$batch` call covering
+  all 8 owner lookups (see Measurements below for the before/after
+  batching numbers) — not evidence the logic doesn't work
+  (`logs/audit-run-2026-08-20.log`).
+- Devices that are non-compliant or haven't checked in. Live-verified: 0
+  devices in the tenant — expected, since the sandbox has no
+  enrolled/registered devices, not evidence the logic doesn't work
+  (`logs/audit-run-2026-08-20.log`).
 
 **Part A's checks are now complete, and severity-ranked HTML report
 generation is implemented, tested, and live-verified.** A live run against
-the sandbox tenant correctly produced 16 critical findings (every MFA-less
-user) and 1 warning finding (the sole privileged-role holder — not
-escalated to critical, since that account does have MFA registered), and
-the report rendered correctly in a browser. See "Report severity model"
-below for the ranking logic.
+the sandbox tenant correctly produced 19 findings — 17 critical (every
+MFA-less user) and 2 warning (the one stale-but-licensed account, and the
+sole privileged-role holder — not escalated to critical, since that
+account does have MFA registered) — matching the `17 critical, 2 warning,
+0 info` summary in `logs/audit-run-2026-08-20.log`, and the report
+rendered correctly in a browser. See "Report severity model" below for
+the ranking logic.
 
 Email delivery is also implemented, tested, and live-verified
 end-to-end — the report email was sent via Graph's `sendMail` and
@@ -152,7 +158,10 @@ be documented precisely:
 
 **Live-verified end-to-end.** A full real `--execute` offboarding run
 succeeded against the tenant: disable, revoke, both group removals, and
-the mailbox step (correctly `not_automated`) all completed as designed.
+the mailbox step (correctly `not_automated`) all completed as designed
+— `"dry_run": false, "result": "success"` for disable, revoke, and both
+group removals, `"result": "not_automated"` for the mailbox step, all in
+`logs/offboarding-audit.jsonl`.
 One known transient issue: the license-reclaim step hit a 409 immediately
 after disable+revoke; a manual retry of the identical call succeeded with
 no code changes. The original 409's error body was never captured, so
@@ -229,8 +238,10 @@ reverses it end-to-end.
 ### Live-verified
 
 A real `--execute` rollback against the tenant correctly reversed license
-assignment and user creation (both reported `reversed`). Group removal
-reported `failed` — **not a bug**: the membership had already been
+assignment and user creation (`rollback_assign_license` and
+`rollback_create_user` both reported `reversed` in
+`logs/onboarding-audit.jsonl`). Group removal (`rollback_add_to_group`,
+same log) reported `failed` — **not a bug**: the membership had already been
 removed by an earlier offboarding run against the same user, so there was
 nothing left to remove. Confirmed directly rather than assumed:
 `scripts/check_group_membership.py` queried the group's membership list
@@ -301,10 +312,10 @@ confirmation.
 | `User.Read.All` | Application | Baseline directory read the app authenticates with — resolves the user identities (UPN, display name, account state) that every check's findings are reported against; app-only because this runs as an unattended nightly job with no signed-in user to delegate from. Also part of the confirmed-sufficient pair (with `AuditLog.Read.All`) for reading `signInActivity` in the stale-account check. Also covers rollback's UPN-to-object-ID resolution (`GET /users/{id}`) — live-confirmed by a real `--execute` rollback run, no new grant needed. |
 | `Reports.Read.All` | Application | Needed by the MFA-registration check to call `reports/authenticationMethods/userRegistrationDetails`. Microsoft's docs list this as sufficient on its own, but live testing against this tenant showed it is **not** — see `AuditLog.Read.All` below. |
 | `AuditLog.Read.All` | Application | Required alongside `Reports.Read.All` for `userRegistrationDetails` on this tenant: a live app-only call with `Reports.Read.All` granted and consented still 403'd with `Authentication_MSGraphPermissionMissing`, naming `AuditLog.Read.All` as missing. Broader than the docs suggest should be necessary, but confirmed required by testing, not assumption. Also covers the stale-account check's `signInActivity` reads on `/users` — live-tested against the tenant, no additional permission was needed there. |
-| `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs. |
-| `Application.Read.All` | Application | Needed by the service-principal-credential check to read `passwordCredentials`/`keyCredentials` on `/servicePrincipals` — service principal objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant. |
-| `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time. |
-| `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required. |
+| `RoleManagement.Read.Directory` | Application | Needed by the privileged-role check to call `/directoryRoles` and `/directoryRoles/{id}/members` — role membership is a distinct permission surface that none of the other granted scopes cover. Confirmed sufficient by live testing against the tenant, not assumed from docs: `GET /directoryRoles -> 200, 2 item(s)` followed by two `GET .../members` calls, both 200, in `logs/audit-run-2026-08-20.log`. |
+| `Application.Read.All` | Application | Needed by the service-principal-credential check to read `passwordCredentials`/`keyCredentials` on `/servicePrincipals` — service principal objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant: `GET /servicePrincipals -> 200` across both pages (172 service principals total) in `logs/audit-run-2026-08-20.log`. |
+| `GroupMember.Read.All` | Application | Needed by the ownerless-group check to call `/groups` and `/groups/{id}/owners` — group objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no repeat of the docs-vs-reality surprise from the MFA check this time: `GET /groups -> 200, 8 item(s)` followed by a 200 on the batched owner-lookup `POST /$batch`, in `logs/audit-run-2026-08-20.log`. |
+| `Device.Read.All` | Application | Needed by the device-compliance check to call `/devices` — device objects aren't covered by any of the other granted scopes. Confirmed sufficient by live testing against the tenant, no additional permission required: `GET /devices -> 200, 0 item(s)` in `logs/audit-run-2026-08-20.log`. |
 | `Mail.Send` | Application | Needed to send the audit report via `POST /users/{sender}/sendMail`. Distinct from every other permission above: this is the first genuinely **write-capable** grant in the project — everything else is `*.Read.*`. Confirmed by live testing end-to-end: the email was both accepted by Graph and confirmed received in the mailbox, not just a 202 response. As granted, it's unscoped to a single mailbox — app-only `Mail.Send` allows sending as any user in the tenant, not just the configured sender. See "What I'd do differently" for why that's a known tradeoff, not something addressed in this portfolio version. |
 | `User.ReadWrite.All` | Application | Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Also covers rollback's use of the same two calls in reverse (`PATCH accountEnabled` to disable/re-enable, `assignLicense` to remove/re-add). Live-verified: a real onboarding `--execute` run successfully created a user, added them to a group, and assigned a license, all in the same run (see `logs/onboarding-audit.jsonl`, entries 1-3); a real `--execute` rollback run then successfully reversed both (license removal and the create-user-reversal disable both reported `reversed`). |
 | `User.RevokeSessions.All` | Application | Needed by offboarding for `POST /users/{id}/revokeSignInSessions` (revoke refresh tokens) — **not covered by `User.ReadWrite.All`**. This was assumed correct the first time and turned out wrong: Graph's own permissions table for this specific action lists `User.RevokeSessions.All` as the *only* Application permission, with the higher-privileged-alternative column reading "Not available" for Application (the broader options Graph does show, e.g. `Directory.ReadWrite.All`, apply only to the Delegated permission row). Caught and corrected during development by checking the docs directly rather than assuming `User.ReadWrite.All`'s broad coverage extended here. Live-verified: a real offboarding `--execute` run's `revoke_refresh_tokens` call succeeded (`"dry_run": false, "result": "success"` in `logs/offboarding-audit.jsonl`), consistent with the "Offboarding reversibility" section above. |
