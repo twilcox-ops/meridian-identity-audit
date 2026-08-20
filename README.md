@@ -482,8 +482,19 @@ a fixed percentage: `1 + ceil(N/20)` calls after batching vs. `1 + N`
 before, so the improvement gets more dramatic the more groups a tenant
 has, up to the point batching's own 20-per-call chunking kicks in.
 
-Throttle-recovery behavior and any other numbers this project produces
-are still TODO.
+**Throttling — `Retry-After` handling, honest status:**
+
+`Retry-After` handling on HTTP 429 is implemented in `graph_client.py`
+(`_with_429_retry`, shared by every verb) and covered by tests that
+exercise the real retry path against a mocked 429 response. A live throttle
+test (`scripts/trigger_throttle.py`) was also run against the real tenant
+to try to observe an actual 429: 900 concurrent `GET /users` requests
+across 6 bursts (~63 req/s), logged in `logs/throttle-trigger.log` — none
+came back. This tenant's throttling threshold wasn't reached at that load.
+Stated plainly: Retry-After handling is proven by mocked tests and a
+real-but-negative live throttle attempt, not by an observed live 429.
+
+Any other numbers this project produces are still TODO.
 
 ## What I'd do differently
 
