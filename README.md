@@ -1,13 +1,22 @@
 # Identity Automation and Posture Audit
 
-<!-- TODO: replace with the actual problem this solves, e.g.:
-"Identity teams find out about MFA gaps and orphaned admin access during an
-audit or an incident, not before. This is a nightly job that surfaces those
-gaps against a real Microsoft Graph tenant, and a dry-run-first automation
-path for the onboarding/offboarding lifecycle work that usually happens by
-hand." -->
+Identity teams usually find out about MFA gaps, dormant licensed accounts,
+and orphaned admin access during an audit or an incident — not before.
+This project closes that gap on two fronts. The first is a nightly,
+unattended check against a real Microsoft Graph tenant that surfaces
+seven categories of drift — missing MFA, stale-but-licensed accounts,
+long-lived guests, privileged role holders, expiring service-principal
+credentials, ownerless groups, non-compliant devices — into one
+severity-ranked report, emailed automatically and run on a schedule
+rather than waited on until something breaks.
 
-TODO: one paragraph, problem-first, before any mention of libraries.
+The second is the lifecycle work that otherwise happens by hand: creating
+a user with their department's groups and license, and later disabling
+them, revoking their sessions, removing them from those groups, and
+reclaiming the license. Every action is logged to an audit trail,
+reversible where the Graph API allows it and documented where it isn't,
+and none of it runs for real without an explicit flag and a typed
+confirmation.
 
 ## Status
 
@@ -296,12 +305,55 @@ confirmation.
 | `User.ReadWrite.All` | Application | Needed by onboarding for `POST /users` (create) and `POST /users/{id}/assignLicense`, and by offboarding for `PATCH /users/{id}` (disable sign-in) and reclaiming the license via the same `assignLicense` call — Graph's own documentation lists this as the least-privileged permission for all of these. Also covers rollback's use of the same two calls in reverse (`PATCH accountEnabled` to disable/re-enable, `assignLicense` to remove/re-add). Live-verified: a real onboarding `--execute` run successfully created a user and assigned a license; a real `--execute` rollback run then successfully reversed both (license removal and the create-user-reversal disable both reported `reversed`). Onboarding's own group-add step and full end-to-end flow are still the one piece of this permission's use not yet fully live-verified (see `GroupMember.ReadWrite.All` below). |
 | `User.RevokeSessions.All` | Application | Needed by offboarding for `POST /users/{id}/revokeSignInSessions` (revoke refresh tokens) — **not covered by `User.ReadWrite.All`**. This was assumed correct the first time and turned out wrong: Graph's own permissions table for this specific action lists `User.RevokeSessions.All` as the *only* Application permission, with the higher-privileged-alternative column reading "Not available" for Application (the broader options Graph does show, e.g. `Directory.ReadWrite.All`, apply only to the Delegated permission row). Caught and corrected during development by checking the docs directly rather than assuming `User.ReadWrite.All`'s broad coverage extended here. A distinct, new grant — not yet live-tested. |
 | `GroupMember.ReadWrite.All` | Application | Needed by onboarding for `POST /groups/{id}/members/$ref` (add to group) and by offboarding for `DELETE /groups/{id}/members/{id}/$ref` (remove from group) — widens the read-only `GroupMember.Read.All` already granted for the ownerless-groups check, per Graph's documentation for both endpoints. Also covers rollback's use of both calls in reverse (onboarding's `add_to_group` reverses via the same `DELETE`; offboarding's `remove_from_groups` reverses via the same `POST`). Onboarding's real `--execute` run's group-add calls failed, but against placeholder GUIDs from the example config, not real group IDs — inconclusive on its own. A real `--execute` rollback of that onboarding run then attempted the `add_to_group` reversal (`DELETE .../members/$ref`) against a real group ID — the call reached Graph and wasn't blocked by a permission error; it failed because the user had already been removed from that group by an intervening offboarding run (confirmed directly via `scripts/check_group_membership.py`, not assumed) — evidence pointing toward this permission being sufficient, though not yet a clean success on a real group ID to call it fully confirmed. |
+| `Organization.Read.All` | Application | Needed by `scripts/list_license_skus.py` to call `/subscribedSkus` — a standalone diagnostic script, not part of any check or Part B action itself; it exists purely to find a real license SKU ID to pass as onboarding's `--license-sku-id`, since SKU IDs are opaque GUIDs with no way to guess them. Confirmed by live testing: the script 403'd without this permission, then succeeded (200, listed the tenant's real SKUs) once it was granted and admin-consented. |
 
 ## Setup
 
-TODO once implemented — will cover the Microsoft 365 Developer tenant, the
-Entra ID app registration (certificate upload, no secret), and `.env` from
-`.env.example`.
+1. Get a tenant — the [Microsoft 365 Developer
+   Program](https://developer.microsoft.com/microsoft-365/dev-program)
+   provisions a free sandbox E5 tenant. Nothing here should ever point at
+   a tenant you don't own.
+2. Register an app in Entra ID. Generate a certificate and upload its
+   public key to the app registration — **no client secret**, this
+   project only supports certificate auth (see "Design constraints"
+   above).
+3. Grant and admin-consent the application permissions this needs, from
+   the Permissions table above. Part A's seven checks need everything
+   through `Device.Read.All`; email delivery additionally needs
+   `Mail.Send`; Part B (onboarding/offboarding/rollback) additionally
+   needs `User.ReadWrite.All`, `User.RevokeSessions.All`, and
+   `GroupMember.ReadWrite.All`, plus `Organization.Read.All` for
+   `scripts/list_license_skus.py` — not used by onboarding itself, but
+   needed by the tool used to find onboarding's `--license-sku-id` input
+   (see step 7). Grant only what the pieces you actually intend to run
+   require.
+4. Clone this repo and install it: `pip install -e .[dev]` (the `dev`
+   extra pulls in `pytest` for the test suite).
+5. Copy `.env.example` to `.env` and fill in `GRAPH_TENANT_ID`,
+   `GRAPH_CLIENT_ID`, `GRAPH_CERT_PATH` (a local path to the certificate's
+   private key, PEM format), and `GRAPH_CERT_THUMBPRINT`. Add
+   `DIGEST_TO`/`DIGEST_FROM` too if you want the audit report emailed
+   instead of just written to `reports/audit-report.html` locally.
+6. If you intend to run onboarding: copy
+   `config/department_groups.example.json` to
+   `config/department_groups.json` and replace the placeholder GUIDs with
+   real group object IDs for this tenant —
+   `.venv/Scripts/python.exe scripts/list_groups.py` will list them.
+7. Also before running onboarding: run
+   `.venv/Scripts/python.exe scripts/list_license_skus.py` to find a real
+   license SKU ID for this tenant — onboarding requires
+   `--license-sku-id`, and SKU IDs are opaque GUIDs with no way to guess
+   them.
+8. Run `pytest` to confirm the test suite passes — this never touches the
+   tenant; every test mocks the Graph responses.
+9. Run it: `run-audit` for Part A (writes the report locally, emails it
+   too if `DIGEST_TO`/`DIGEST_FROM` are set). `onboard-user` and
+   `offboard-user` for Part B, both dry-run by default — add `--execute`
+   plus a typed confirmation for a real run, or `--rollback` to reverse a
+   prior one.
+
+For the nightly schedule instead of a manual `run-audit`, see "GitHub
+Actions secrets" below.
 
 ### GitHub Actions secrets
 
@@ -325,7 +377,90 @@ rather than failing the run.
 
 ## Architecture
 
-TODO: diagram once there's a shape to draw.
+No diagram — out of scope for this pass, see the note at the end on
+whether one would earn its place. A textual description instead.
+
+**Foundation everything else depends on:**
+
+- `auth.py` + `config.py` — certificate-based app-only MSAL auth.
+  `config.py` loads and validates the four `GRAPH_*` environment
+  variables; `auth.py` exchanges the certificate for a Graph access
+  token.
+- `graph_client.py` — the one HTTP layer every other module goes
+  through. `GraphClient` wraps a `requests.Session` and exposes
+  `get_pages` (paginated collections, follows `@odata.nextLink`),
+  `get`/`post`/`patch`/`delete` (single-request verbs), and `batch`
+  (bundles up to 20 GETs into one `/$batch` POST). Every verb shares one
+  `Retry-After`-honoring 429 retry loop. Nothing outside this file
+  constructs a Graph request by hand.
+
+**Part A — the audit, read-only:**
+
+- `checks/` — seven independent modules (`mfa.py`, `stale_accounts.py`,
+  `guest_accounts.py`, `privileged_roles.py`,
+  `service_principal_credentials.py`, `ownerless_groups.py`,
+  `device_compliance.py`), each taking a `GraphClient` and returning a
+  plain list of dataclass results. None of them know about each other,
+  the report, or email — they only read.
+- `report.py` — takes all seven checks' raw results, normalizes them
+  into one `Finding` list, applies the severity model and the cross-check
+  escalation rules (see "Report severity model" above), and renders the
+  HTML.
+- `mailer.py` — sends that HTML via Graph's `sendMail`, gated on
+  `DIGEST_TO`/`DIGEST_FROM` being set; a no-op otherwise.
+- `ci.py` — detects `CI=true` (set automatically by GitHub Actions) and
+  suppresses the per-user console detail each check would otherwise
+  print, so real UPNs never land in a CI log.
+- `run.py` — the orchestrator: acquires a token, constructs one
+  `GraphClient`, calls all seven checks, builds and writes the report,
+  sends the email if configured. This is `run-audit`.
+
+**Part B — the writes, dry-run first:**
+
+- `audit_trail.py` — the shared `AuditEntry` record shape and JSONL
+  writer both onboarding and offboarding use for every action.
+- `confirmation.py` — the shared typed-retype-the-UPN confirmation gate
+  every real write path calls before doing anything — onboarding,
+  offboarding, and both their `--rollback` modes.
+- `onboarding.py` — `onboard_user()`: create, add to department groups
+  (from `config/department_groups.json`), assign a license. `main()` is
+  the `onboard-user` console script, and also handles `--rollback`.
+- `offboarding.py` — `offboard_user()`: disable, revoke refresh tokens,
+  remove from every current group (discovered live via `memberOf`, not
+  assumed from config), reclaim a license, and log — never attempt — the
+  mailbox-to-shared step Graph has no endpoint for. `main()` is
+  `offboard-user`, and also handles `--rollback`.
+- `rollback.py` — the shared engine both modules' `--rollback` calls:
+  finds a prior run's audit entries (by timestamp, defaulting to most
+  recent), reverses whichever are both reversible and successful, and
+  reports the rest honestly instead of skipping them silently.
+
+**Entry points:** three console scripts registered in `pyproject.toml`
+(`run-audit`, `onboard-user`, `offboard-user`), plus three standalone
+diagnostic scripts under `scripts/` that are deliberately outside the
+package (`list_license_skus.py`, `list_groups.py`,
+`check_group_membership.py`).
+
+**GitHub Actions** (`.github/workflows/nightly-audit.yml`) is the only
+scheduled trigger in the project — it runs `run-audit` on a nightly cron
+(plus `workflow_dispatch` for manual runs), staging the certificate from
+a `GRAPH_CERT_PEM` secret to a per-job temp file before every run.
+Nothing in Part B has a scheduled trigger: onboarding, offboarding, and
+rollback only ever run when a human runs them, on purpose, with a typed
+confirmation gating anything real.
+
+**Would a diagram add value here?** Flagging as asked: probably yes, but
+a narrow one — not a picture of the module list above, prose already
+covers that adequately. The thing genuinely hard to hold in your head
+from text alone is the *call shape* of a few specific pieces: the
+two-step list-then-per-item pattern shared by `privileged_roles.py` and
+the pre-batching version of `ownerless_groups.py`, next to
+`ownerless_groups.py`'s current batched version of that same shape; and
+the dependency fan-in where `onboarding.py` and `offboarding.py` both
+pull from `rollback.py`, `audit_trail.py`, and `confirmation.py`. A
+diagram scoped to just those relationships would earn its place. A
+diagram of the full module list wouldn't tell a reader much more than
+this list already does.
 
 ## Measurements
 
